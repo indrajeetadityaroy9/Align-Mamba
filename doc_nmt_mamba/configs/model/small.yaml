@@ -1,0 +1,32 @@
+# Small model configuration (25M params)
+# For debugging and rapid ablations
+
+name: small
+
+# Architecture
+encoder_layers: 6
+decoder_layers: 6
+d_model: 384
+d_state: 64
+d_conv: 4
+expand: 2
+
+# Attention configuration (1:7 ratio)
+attention_ratio: 0.125
+n_heads: 6
+head_dim: 64
+cross_attn_every: 4
+
+# Regularization
+dropout: 0.1
+
+# Positional encoding
+max_seq_len: 8192
+rope_theta: 10000.0
+
+# Vocabulary (overridden by tokenizer at runtime)
+# Using 32K BPE tokenizer (32768 vocab) for proper parameter allocation
+vocab_size: 32768
+pad_token_id: 0
+bos_token_id: 1
+eos_token_id: 2

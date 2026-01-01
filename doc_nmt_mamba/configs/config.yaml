@@ -1,0 +1,31 @@
+# Main configuration file
+# Uses Hydra's defaults system for composability
+
+defaults:
+  - model: medium
+  - training: default
+  - data: iwslt14_de_en
+  - _self_
+
+# Project settings
+project:
+  name: doc_nmt_mamba
+  seed: 42
+  output_dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Logging
+logging:
+  level: INFO
+  wandb:
+    enabled: false
+    project: doc-nmt-mamba
+    entity: null
+    tags: ["hybrid", "mamba", "nmt"]
+
+# Hydra settings
+hydra:
+  run:
+    dir: ${project.output_dir}
+  sweep:
+    dir: outputs/sweeps/${now:%Y-%m-%d}
+    subdir: ${hydra.job.num}

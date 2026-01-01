@@ -1,0 +1,36 @@
+# OPUS Books German-English configuration
+# RECOMMENDED for Document-Level NMT (preserves document boundaries)
+
+name: opus_books_de_en
+
+# Dataset type - CRITICAL for thesis
+# opus_books: Literary texts with document structure (consecutive entries from same book)
+# This enables proper document-level learning with CAT-N augmentation
+dataset_name: opus_books
+
+# Tokenizer settings
+tokenizer_type: custom  # 32K BPE (RECOMMENDED)
+tokenizer_path: data/tokenizer/tokenizer.json
+
+# Language settings (mBART format - only used if tokenizer_type=mbart)
+src_lang: de_DE
+tgt_lang: en_XX
+
+# Sequence lengths
+max_src_length: 4096
+max_tgt_length: 4096
+
+# CAT-N augmentation - CRITICAL for document-level learning
+# Concatenates N consecutive sentences from same document
+cat_n: 5  # CAT-5 strategy (recommended in SSM-MT paper)
+p_concat: 0.5  # 50% single, 50% concatenated
+
+# Collation mode
+collator_mode: packed  # 20-30% faster on H100
+
+# Data loading
+num_workers: 8
+prefetch_factor: 4
+
+# Validation split ratio (OPUS Books only has train split)
+val_ratio: 0.05

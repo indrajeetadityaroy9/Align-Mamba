@@ -1,0 +1,32 @@
+# FAST OPUS Books configuration - Optimized for speed
+
+name: opus_books_fast
+
+# Dataset
+dataset_name: opus_books
+
+# Tokenizer
+tokenizer_type: custom
+tokenizer_path: data/tokenizer/tokenizer.json
+
+# Language settings
+src_lang: de_DE
+tgt_lang: en_XX
+
+# Sequence lengths - REDUCED for speed (still captures document context)
+max_src_length: 2048
+max_tgt_length: 2048
+
+# CAT-N augmentation
+cat_n: 5
+p_concat: 0.5
+
+# Collation
+collator_mode: packed
+
+# Data loading - MAXIMIZED
+num_workers: 16  # Use more CPU cores
+prefetch_factor: 4
+
+# Validation
+val_ratio: 0.05

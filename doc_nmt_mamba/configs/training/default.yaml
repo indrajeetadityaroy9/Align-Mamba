@@ -1,0 +1,46 @@
+# Default training configuration for H100 80GB
+
+# Training loop
+max_steps: 100000
+batch_size: 64  # H100 80GB enables larger batch
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
+
+# Optimization
+learning_rate: 1e-4  # Conservative for Mamba stability
+weight_decay: 0.01
+betas: [0.9, 0.95]
+
+# Scheduling
+scheduler_type: cosine
+warmup_steps: 4000
+min_lr: 1e-6
+
+# Memory optimization
+gradient_checkpointing: true
+use_bf16: true  # BF16 for H100 (no scaling needed)
+
+# torch.compile
+use_compile: true
+compile_mode: max-autotune
+
+# H100 optimizations
+tf32_matmul: true
+cudnn_benchmark: true
+
+# Logging and checkpointing
+log_steps: 100
+eval_steps: 1000
+save_steps: 5000
+save_total_limit: 3
+output_dir: outputs
+
+# Regularization
+label_smoothing: 0.1
+
+# Reproducibility
+seed: 42
+deterministic: false  # True slows down training
+
+# Resume
+resume_from: null

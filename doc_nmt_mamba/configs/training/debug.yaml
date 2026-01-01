@@ -1,0 +1,47 @@
+# Debug configuration for overfit sanity check
+# Use with: python scripts/train.py training=debug model=small
+
+# Training loop - minimal for dry run
+max_steps: 50
+batch_size: 4
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
+
+# Optimization
+learning_rate: 1e-4
+weight_decay: 0.01
+betas: [0.9, 0.95]
+
+# Scheduling
+scheduler_type: cosine
+warmup_steps: 10
+min_lr: 1e-6
+
+# Memory optimization
+gradient_checkpointing: false  # Faster for debugging
+use_bf16: true
+
+# torch.compile - disabled for faster startup
+use_compile: false
+compile_mode: default
+
+# H100 optimizations
+tf32_matmul: true
+cudnn_benchmark: true
+
+# Logging and checkpointing - frequent for debugging
+log_steps: 1
+eval_steps: 100
+save_steps: 100
+save_total_limit: 1
+output_dir: outputs/debug
+
+# Regularization
+label_smoothing: 0.1
+
+# Reproducibility
+seed: 42
+deterministic: false
+
+# Resume
+resume_from: null
