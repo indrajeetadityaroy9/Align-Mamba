@@ -48,7 +48,7 @@ except ImportError:
     COMET_AVAILABLE = False
     warnings.warn("comet-ml not installed. Run: pip install unbabel-comet")
 
-from models import ModelConfig, HybridMambaEncoderDecoder
+from models import ModelConfig, HybridMambaEncoderDecoder, load_model_from_checkpoint
 from data import create_tokenizer, create_dataset
 
 
@@ -389,24 +389,32 @@ def generate_translations(
     for i in tqdm(range(0, len(sources), batch_size), desc="Translating"):
         batch_sources = sources[i:i + batch_size]
 
-        # Tokenize
-        encoded = tokenizer(
-            batch_sources,
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
-        )
+        # Tokenize - handle both CustomBPETokenizer and HuggingFace tokenizers
+        if hasattr(tokenizer, 'encode_source'):
+            # CustomBPETokenizer
+            encoded = tokenizer.encode_source(
+                batch_sources,
+                max_length=max_length,
+                return_tensors=True,
+            )
+        else:
+            # HuggingFace tokenizer
+            encoded = tokenizer(
+                batch_sources,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
         input_ids = encoded["input_ids"].to(device)
 
         # Generate
         with torch.no_grad():
             if hasattr(model, 'generate'):
+                # Use model's native generate method
                 output_ids = model.generate(
                     input_ids,
-                    max_new_tokens=max_length,
-                    num_beams=4,
-                    early_stopping=True,
+                    max_length=max_length,
                 )
             else:
                 # Manual greedy generation
@@ -560,28 +568,14 @@ def main():
         tokenizer_path=args.tokenizer_path,
     )
 
-    # Load model
+    # Load model using unified checkpoint loader
     print("Loading model...")
-    checkpoint = torch.load(args.checkpoint, map_location=device)
-
-    if 'config' in checkpoint:
-        config = checkpoint['config']
-        if isinstance(config, dict):
-            config = ModelConfig(**config)
-    else:
-        config = ModelConfig()
-
-    model = HybridMambaEncoderDecoder(config=config, device=device, dtype=torch.bfloat16)
-
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    elif 'model' in checkpoint:
-        model.load_state_dict(checkpoint['model'])
-    else:
-        model.load_state_dict(checkpoint)
-
-    model = model.to(device)
-    model.eval()
+    model, config = load_model_from_checkpoint(
+        args.checkpoint,
+        device=device,
+        dtype=torch.bfloat16,
+        strict=False,  # Allow legacy checkpoints
+    )
 
     model_name = Path(args.checkpoint).stem
 

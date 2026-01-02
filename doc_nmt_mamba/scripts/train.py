@@ -19,12 +19,14 @@ Hydra configuration from configs/ directory.
 
 import os
 import sys
+import random
 from pathlib import Path
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
@@ -87,6 +89,19 @@ def create_model(cfg: DictConfig, device: str, dtype: torch.dtype) -> HybridMamb
     print(f"Decoder: {model.decoder.get_layer_counts()}")
 
     return model
+
+
+def worker_init_fn(worker_id: int):
+    """
+    Initialize worker with unique seed for reproducibility.
+
+    Each worker gets a unique seed derived from the base seed + worker_id.
+    This ensures reproducible data loading across runs.
+    """
+    # Get current state and derive unique seed per worker
+    worker_seed = torch.initial_seed() % (2**32) + worker_id
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def create_dataloaders(cfg: DictConfig, tokenizer, dist_info: dict):
@@ -161,6 +176,7 @@ def create_dataloaders(cfg: DictConfig, tokenizer, dist_info: dict):
         "pin_memory": pin_memory,
         "persistent_workers": persistent_workers,
         "drop_last": cfg.data.get("drop_last", False),
+        "worker_init_fn": worker_init_fn if num_workers > 0 else None,
     }
 
     if num_workers > 0 and cfg.data.get("prefetch_factor"):

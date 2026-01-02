@@ -12,10 +12,12 @@ H100-optimized training with:
 
 import os
 import time
+import random
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -33,11 +35,22 @@ from .distributed import (
     all_reduce_mean,
     barrier,
 )
+from .hardware import (
+    detect_hardware,
+    print_hardware_info,
+    setup_h100_optimizations,
+    setup_nccl_optimizations,
+    CUDAMemoryManager,
+)
 
 
 @dataclass
 class TrainerConfig:
     """Configuration for the trainer."""
+
+    # Reproducibility (NeurIPS/ICML standard)
+    seed: int = 42
+    deterministic: bool = False  # Enable for exact reproducibility (may reduce performance)
 
     # Training
     max_steps: int = 100000
@@ -130,6 +143,9 @@ class Trainer:
         # Print distributed info (main process only)
         print_distributed_info(self.dist_info)
 
+        # Setup reproducibility (seeds)
+        self._setup_reproducibility()
+
         # Apply H100 optimizations
         self._setup_h100_optimizations()
 
@@ -190,13 +206,64 @@ class Trainer:
         barrier()  # Wait for directory creation
 
     def _setup_h100_optimizations(self):
-        """Setup H100-specific optimizations."""
-        if self.config.tf32_matmul:
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+        """Setup H100-specific optimizations using hardware detection."""
+        # Detect hardware and print info (main process only)
+        if self.is_main:
+            self.hardware_info = detect_hardware()
+            print_hardware_info(self.hardware_info)
+        else:
+            self.hardware_info = detect_hardware()
 
-        if self.config.cudnn_benchmark:
-            torch.backends.cudnn.benchmark = True
+        # Apply H100/Ampere optimizations
+        has_ampere = any(
+            gpu.compute_capability >= (8, 0) for gpu in self.hardware_info.gpus
+        ) if self.hardware_info.gpus else False
+
+        setup_h100_optimizations(
+            enable_tf32=self.config.tf32_matmul and has_ampere,
+            enable_cudnn_benchmark=self.config.cudnn_benchmark,
+            enable_flash_sdp=has_ampere,
+            enable_mem_efficient_sdp=has_ampere,
+            cuda_alloc_conf="expandable_segments:True",
+        )
+
+        # Setup NCCL optimizations for multi-GPU
+        if self.world_size > 1:
+            setup_nccl_optimizations(
+                nvlink_available=self.hardware_info.nvlink_available,
+                use_infiniband=False,
+            )
+
+    def _setup_reproducibility(self):
+        """
+        Set seeds for reproducibility per NeurIPS/ICML guidelines.
+
+        This ensures deterministic behavior across runs when using the same seed.
+        Note: Full determinism may slightly reduce performance.
+        """
+        import random
+        import numpy as np
+
+        seed = self.config.seed
+
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+
+        # Enable full determinism if requested (may reduce performance by 10-20%)
+        if self.config.deterministic:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            if self.is_main:
+                print("Deterministic mode enabled (may reduce performance)")
+
+        if self.is_main:
+            print(f"Set random seed: {seed}")
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with weight decay."""
@@ -236,6 +303,10 @@ class Trainer:
         if hasattr(self.train_dataloader, 'sampler') and hasattr(self.train_dataloader.sampler, 'set_epoch'):
             self.train_dataloader.sampler.set_epoch(self.epoch)
 
+        # Set epoch for dataset augmentation (reproducible CAT-N across runs)
+        if hasattr(self.train_dataloader, 'dataset') and hasattr(self.train_dataloader.dataset, 'set_epoch'):
+            self.train_dataloader.dataset.set_epoch(self.epoch)
+
         while self.global_step < self.config.max_steps:
             # Get batch
             try:
@@ -245,6 +316,9 @@ class Trainer:
                 # Update sampler epoch for proper shuffling
                 if hasattr(self.train_dataloader, 'sampler') and hasattr(self.train_dataloader.sampler, 'set_epoch'):
                     self.train_dataloader.sampler.set_epoch(self.epoch)
+                # Update dataset epoch for reproducible augmentation
+                if hasattr(self.train_dataloader, 'dataset') and hasattr(self.train_dataloader.dataset, 'set_epoch'):
+                    self.train_dataloader.dataset.set_epoch(self.epoch)
                 data_iter = iter(self.train_dataloader)
                 batch = next(data_iter)
 
@@ -264,10 +338,17 @@ class Trainer:
             if (self.global_step + 1) % self.config.gradient_accumulation_steps == 0:
                 # Gradient clipping
                 if self.config.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(),
                         self.config.max_grad_norm,
                     )
+
+                    # Check for NaN/Inf gradients (publication-grade stability)
+                    if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                        if self.is_main:
+                            print(f"WARNING: NaN/Inf gradient detected at step {self.global_step}, skipping update")
+                        self.optimizer.zero_grad(set_to_none=True)
+                        continue
 
                 self.optimizer.step()
                 self.scheduler.step()
@@ -288,12 +369,16 @@ class Trainer:
                     samples_per_sec = steps_per_sec * self.config.batch_size * self.world_size
                     lr = self.scheduler.get_last_lr()[0]
 
+                    # Get memory stats
+                    mem_stats = CUDAMemoryManager.get_memory_stats()
+
                     print(
                         f"Step {self.global_step}/{self.config.max_steps} | "
                         f"Loss: {accumulated_loss:.4f} | "
                         f"LR: {lr:.2e} | "
                         f"Steps/s: {steps_per_sec:.2f} | "
-                        f"Samples/s: {samples_per_sec:.1f}"
+                        f"Samples/s: {samples_per_sec:.1f} | "
+                        f"Mem: {mem_stats['allocated']:.1f}/{mem_stats['reserved']:.1f}GB"
                     )
 
                 accumulated_loss = 0.0
@@ -325,18 +410,22 @@ class Trainer:
 
             # Forward pass with padded tensors
             # Input to decoder: tgt_ids[:, :-1] (all but last)
-            # Labels: tgt_ids[:, 1:] shifted left (all but first)
+            # Labels come from LabelShiftCollator (already shifted with -100 at boundaries)
             decoder_input = tgt_ids[:, :-1]
-            labels_shifted = tgt_ids[:, 1:].clone()
 
-            # Replace padding positions with ignore_index in labels
-            labels_shifted[~tgt_mask[:, 1:]] = -100
+            # Use pre-computed labels from collator, truncate to match decoder output
+            # labels[i] = tgt_ids[i+1], with labels[-1] = -100 (from collator)
+            # We need labels of shape (batch, tgt_len-1) to match decoder output
+            labels_for_loss = labels[:, :-1].clone()
+
+            # Apply mask to handle padding positions (in case collator didn't mask them)
+            labels_for_loss[~tgt_mask[:, :-1]] = -100
 
             logits = self.model(src_ids, decoder_input)
 
             # Flatten and compute loss
             logits_flat = logits.reshape(-1, logits.size(-1))
-            labels_flat = labels_shifted.reshape(-1)
+            labels_flat = labels_for_loss.reshape(-1)
 
             loss = self.loss_fn(logits_flat, labels_flat)
         else:
@@ -458,10 +547,23 @@ class Trainer:
         barrier()  # Sync after evaluation
 
     def _save_checkpoint(self, name: Optional[str] = None):
-        """Save training checkpoint (main process only)."""
+        """
+        Save training checkpoint with embedded config (NeurIPS/ICML standard).
+
+        Saves a unified checkpoint.pt with:
+        - model_state_dict: Model weights
+        - config: ModelConfig for architecture reproduction
+        - optimizer_state_dict: Optimizer state for resumption
+        - scheduler_state_dict: Scheduler state
+        - Training metadata (step, epoch, metrics)
+        - Environment metadata (PyTorch version, CUDA, timestamp)
+        """
         if not self.is_main:
             barrier()  # Wait for main process
             return
+
+        from dataclasses import asdict
+        from datetime import datetime
 
         if name is None:
             name = f"checkpoint-{self.global_step}"
@@ -478,22 +580,46 @@ class Trainer:
         if hasattr(model_to_save, "module"):
             model_to_save = model_to_save.module
 
+        # Get config from model
+        config_dict = None
+        if hasattr(model_to_save, 'config'):
+            config_dict = asdict(model_to_save.config)
+
+        # Build unified checkpoint (NeurIPS/ICML standard format)
+        checkpoint = {
+            'model_state_dict': model_to_save.state_dict(),
+            'config': config_dict,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'global_step': self.global_step,
+            'epoch': self.epoch,
+            'best_metric': self.best_metric,
+            # RNG states for reproducible resume (critical for publication)
+            'rng_state': {
+                'python': random.getstate(),
+                'numpy': np.random.get_state(),
+                'torch': torch.get_rng_state(),
+                'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            },
+            'metadata': {
+                'pytorch_version': torch.__version__,
+                'cuda_version': torch.version.cuda if torch.cuda.is_available() else None,
+                'timestamp': datetime.now().isoformat(),
+                'world_size': self.world_size,
+                'seed': self.config.seed,
+            }
+        }
+
+        # Save unified checkpoint
+        torch.save(checkpoint, checkpoint_dir / "checkpoint.pt")
+
+        # Also save model-only checkpoint for inference (backward compatibility)
         torch.save(model_to_save.state_dict(), checkpoint_dir / "model.pt")
 
-        # Save optimizer and scheduler
-        torch.save(
-            {
-                "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.scheduler.state_dict(),
-                "global_step": self.global_step,
-                "epoch": self.epoch,
-                "best_metric": self.best_metric,
-                "world_size": self.world_size,
-            },
-            checkpoint_dir / "training_state.pt",
-        )
-
         print(f"Saved checkpoint to {checkpoint_dir}")
+        if config_dict:
+            print(f"  Config: d_model={config_dict.get('d_model')}, "
+                  f"layers={config_dict.get('encoder_layers')}/{config_dict.get('decoder_layers')}")
 
         # Cleanup old checkpoints
         self._cleanup_checkpoints()
@@ -514,19 +640,56 @@ class Trainer:
             print(f"Removed old checkpoint: {oldest}")
 
     def load_checkpoint(self, checkpoint_path: str):
-        """Load from checkpoint."""
+        """
+        Load from checkpoint (supports both new and legacy formats).
+
+        New format: checkpoint.pt with embedded config and all state
+        Legacy format: model.pt + training_state.pt
+        """
         checkpoint_dir = Path(checkpoint_path)
 
-        # Load model
-        model_to_load = self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model
-        model_to_load.load_state_dict(torch.load(checkpoint_dir / "model.pt"))
+        # Get underlying model
+        model_to_load = self.model
+        if hasattr(model_to_load, "_orig_mod"):
+            model_to_load = model_to_load._orig_mod
+        if hasattr(model_to_load, "module"):
+            model_to_load = model_to_load.module
 
-        # Load training state
-        state = torch.load(checkpoint_dir / "training_state.pt")
-        self.optimizer.load_state_dict(state["optimizer"])
-        self.scheduler.load_state_dict(state["scheduler"])
-        self.global_step = state["global_step"]
-        self.epoch = state["epoch"]
-        self.best_metric = state["best_metric"]
+        # Try new unified format first
+        unified_path = checkpoint_dir / "checkpoint.pt"
+        if unified_path.exists():
+            checkpoint = torch.load(unified_path, map_location=self.device, weights_only=False)
+            model_to_load.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            self.global_step = checkpoint['global_step']
+            self.epoch = checkpoint['epoch']
+            self.best_metric = checkpoint['best_metric']
 
-        print(f"Loaded checkpoint from {checkpoint_dir} (step {self.global_step})")
+            # Restore RNG states for reproducible resume
+            if 'rng_state' in checkpoint:
+                rng_state = checkpoint['rng_state']
+                random.setstate(rng_state['python'])
+                np.random.set_state(rng_state['numpy'])
+                torch.set_rng_state(rng_state['torch'])
+                if rng_state['cuda'] is not None and torch.cuda.is_available():
+                    torch.cuda.set_rng_state_all(rng_state['cuda'])
+                if self.is_main:
+                    print("  Restored RNG states for reproducible resume")
+
+            if 'metadata' in checkpoint:
+                print(f"Loaded checkpoint from {checkpoint_dir}")
+                print(f"  Step: {self.global_step}, Epoch: {self.epoch}")
+                print(f"  Saved: {checkpoint['metadata'].get('timestamp', 'unknown')}")
+        else:
+            # Fallback to legacy format
+            model_to_load.load_state_dict(torch.load(checkpoint_dir / "model.pt", map_location=self.device))
+
+            state = torch.load(checkpoint_dir / "training_state.pt", map_location=self.device)
+            self.optimizer.load_state_dict(state["optimizer"])
+            self.scheduler.load_state_dict(state["scheduler"])
+            self.global_step = state["global_step"]
+            self.epoch = state["epoch"]
+            self.best_metric = state["best_metric"]
+
+            print(f"Loaded legacy checkpoint from {checkpoint_dir} (step {self.global_step})")

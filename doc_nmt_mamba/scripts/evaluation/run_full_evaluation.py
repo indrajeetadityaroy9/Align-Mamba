@@ -6,40 +6,41 @@ Orchestrates all evaluations required for publication:
 - Part 1: Translation Quality (Table 1) - BLEU, COMET, ChrF++
 - Part 2: Efficiency & Scaling (Money Charts) - Throughput, Memory, TTFT/ITL
 - Part 3: Scientific Novelty (Context) - ContraPro pronoun disambiguation
-- Part 4: Ablations (if models available)
 
 Generates all artifacts for paper:
 - Table 1: Quality vs. Baselines
-- Figure 1: Convergence (Loss vs. Wall-clock)
 - Figure 2: Throughput scaling (Log-Log)
 - Figure 3: ContraPro accuracy vs. distance
-- Table 2: Ablation results
 
 Usage:
-    # Full evaluation
-    python scripts/evaluation/run_full_evaluation.py --checkpoint outputs/best_model.pt
+    # Full evaluation (use migrated v2 checkpoints)
+    python scripts/evaluation/run_full_evaluation.py \
+        --checkpoint outputs/thesis_fast/mamba/checkpoint-20000/model.v2.pt
 
     # Quick evaluation (skip COMET, reduce samples)
-    python scripts/evaluation/run_full_evaluation.py --checkpoint outputs/best_model.pt --quick
+    python scripts/evaluation/run_full_evaluation.py \
+        --checkpoint outputs/thesis_fast/mamba/checkpoint-20000/model.v2.pt --quick
 
     # Only quality metrics
-    python scripts/evaluation/run_full_evaluation.py --checkpoint outputs/best_model.pt --only quality
+    python scripts/evaluation/run_full_evaluation.py \
+        --checkpoint outputs/thesis_fast/mamba/checkpoint-20000/model.v2.pt --only quality
 """
 
-import os
-import sys
-import json
 import argparse
-from pathlib import Path
-from datetime import datetime
-from typing import Dict, List, Optional
+import json
+import sys
 import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Optional
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import torch
+
+from models import load_model_from_checkpoint
 
 
 def check_dependencies():
@@ -92,32 +93,22 @@ def run_quality_evaluation(
         save_results,
     )
     from data import create_tokenizer
-    from models import ModelConfig, HybridMambaEncoderDecoder
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load tokenizer and model
+    # Load tokenizer (HuggingFace-compatible interface)
     tokenizer = create_tokenizer(
         tokenizer_type="custom",
         tokenizer_path="data/tokenizer/tokenizer.json",
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    config = checkpoint.get('config', {})
-    if isinstance(config, dict):
-        config = ModelConfig(**config)
-
-    model = HybridMambaEncoderDecoder(config=config, device=device, dtype=torch.bfloat16)
-
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    elif 'model' in checkpoint:
-        model.load_state_dict(checkpoint['model'])
-    else:
-        model.load_state_dict(checkpoint)
-
-    model = model.to(device)
-    model.eval()
+    # Load model (publication-standard checkpoint with embedded config)
+    model, config = load_model_from_checkpoint(
+        checkpoint_path,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    print(f"Loaded model: d_model={config.d_model}, layers={config.encoder_layers}/{config.decoder_layers}")
 
     model_name = Path(checkpoint_path).stem
 
@@ -172,12 +163,13 @@ def run_efficiency_evaluation(
     print("="*60)
 
     from scripts.evaluation.benchmark_inference import (
-        load_model_from_checkpoint,
         run_benchmark_sweep,
         save_results,
         generate_plots,
         BenchmarkConfig,
     )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Configure benchmark
     if quick:
@@ -199,9 +191,9 @@ def run_efficiency_evaluation(
             output_dir=output_dir,
         )
 
-    # Load model
-    model, model_name = load_model_from_checkpoint(checkpoint_path)
-    model = model.cuda()
+    # Load model (publication-standard checkpoint)
+    model, model_config = load_model_from_checkpoint(checkpoint_path, device=device)
+    model_name = Path(checkpoint_path).stem
 
     # Run benchmarks
     results = run_benchmark_sweep(model, f"Hybrid-{model_name}", config)
@@ -241,32 +233,21 @@ def run_contrapro_evaluation(
         generate_accuracy_plot,
     )
     from data import create_tokenizer
-    from models import ModelConfig, HybridMambaEncoderDecoder
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load tokenizer and model
+    # Load tokenizer
     tokenizer = create_tokenizer(
         tokenizer_type="custom",
         tokenizer_path="data/tokenizer/tokenizer.json",
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    config = checkpoint.get('config', {})
-    if isinstance(config, dict):
-        config = ModelConfig(**config)
-
-    model = HybridMambaEncoderDecoder(config=config, device=device, dtype=torch.bfloat16)
-
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    elif 'model' in checkpoint:
-        model.load_state_dict(checkpoint['model'])
-    else:
-        model.load_state_dict(checkpoint)
-
-    model = model.to(device)
-    model.eval()
+    # Load model (publication-standard checkpoint)
+    model, config = load_model_from_checkpoint(
+        checkpoint_path,
+        device=device,
+        dtype=torch.bfloat16,
+    )
 
     model_name = Path(checkpoint_path).stem
 
@@ -385,7 +366,7 @@ Model & BLEU ($\\uparrow$) & COMET ($\\uparrow$) & ChrF++ ($\\uparrow$) \\\\
 def main():
     parser = argparse.ArgumentParser(description="Full Evaluation Pipeline")
     parser.add_argument("--checkpoint", type=str, required=True,
-                       help="Path to model checkpoint")
+                       help="Path to model checkpoint (v2 format with embedded config)")
     parser.add_argument("--output-dir", type=str, default="experiments/results",
                        help="Output directory for results")
     parser.add_argument("--quick", action="store_true",

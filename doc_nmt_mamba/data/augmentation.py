@@ -53,9 +53,25 @@ class ConcatenationAugmenter:
         self.separator = separator
         self.min_concat = min_concat
         self.max_concat = max_concat or n_sentences
+        self.seed = seed
+        self._epoch = 0
 
         if seed is not None:
             random.seed(seed)
+
+    def set_epoch(self, epoch: int) -> None:
+        """
+        Set epoch for reproducible augmentation.
+
+        Should be called at the start of each epoch to ensure reproducibility
+        across runs. The RNG is reset to seed + epoch for each epoch.
+
+        Args:
+            epoch: Current epoch number
+        """
+        self._epoch = epoch
+        if self.seed is not None:
+            random.seed(self.seed + epoch)
 
     def augment_document(
         self,

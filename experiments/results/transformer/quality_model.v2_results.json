@@ -1,0 +1,19 @@
+{
+  "model_name": "model.v2",
+  "dataset": "iwslt14-test",
+  "num_samples": 500,
+  "bleu": 7.274387918128418,
+  "bleu_signature": "BLEU = 7.27 33.3/15.6/3.2/1.7 (BP = 1.000 ratio = 1.000 hyp_len = 33 ref_len = 33)",
+  "comet": null,
+  "chrf": 16.806192246676282,
+  "chrf_plus_plus": 16.046613719256595,
+  "bleu_1": 33.333333333333336,
+  "bleu_2": 15.625,
+  "bleu_3": 3.225806451612903,
+  "bleu_4": 1.6666666666666667,
+  "brevity_penalty": 1.0,
+  "bleu_ci_low": 0.8514744914339477,
+  "bleu_ci_high": 0.9584014248060193,
+  "comet_ci_low": null,
+  "comet_ci_high": null
+}

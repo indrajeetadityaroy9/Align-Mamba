@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-01-02T03:37:28.213907",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "results": {
+    "quality": {
+      "bleu": 9.554385870972556,
+      "comet": null,
+      "chrf": 23.391359319755693
+    }
+  }
+}

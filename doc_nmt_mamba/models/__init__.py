@@ -38,6 +38,12 @@ from .hybrid import (
     AttentionKVCache,
 )
 
+from .checkpoint_utils import (
+    load_model_from_checkpoint,
+    load_checkpoint,
+    save_checkpoint,
+)
+
 __all__ = [
     # Main model
     "ModelConfig",
@@ -62,4 +68,8 @@ __all__ = [
     "HybridMambaDecoder",
     "MambaState",
     "AttentionKVCache",
+    # Checkpoint utilities
+    "load_model_from_checkpoint",
+    "load_checkpoint",
+    "save_checkpoint",
 ]

@@ -82,6 +82,7 @@ class BidirectionalAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
         max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
@@ -92,6 +93,8 @@ class BidirectionalAttention(nn.Module):
             x: Input tensor
                - Padded mode: (batch, seq_len, d_model)
                - Packed mode: (total_tokens, d_model)
+            attention_mask: Optional attention mask (batch, seq_len) for padded mode.
+                           True/1 = attend, False/0 = mask out (padding).
             cu_seqlens: Cumulative sequence lengths for packed mode (batch+1,)
             max_seqlen: Maximum sequence length in batch (for packed mode)
 
@@ -166,8 +169,19 @@ class BidirectionalAttention(nn.Module):
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
 
-            if FLASH_ATTN_AVAILABLE:
+            # Prepare attention mask for SDPA if provided
+            # attention_mask: (B, T) where True/1 = attend, False/0 = mask
+            attn_mask = None
+            if attention_mask is not None:
+                # Convert to (B, 1, 1, T) for broadcasting with (B, H, T, T)
+                attn_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+                # Convert boolean mask to float mask: 0 = attend, -inf = mask
+                attn_mask = attn_mask.to(dtype=q.dtype)
+                attn_mask = (1.0 - attn_mask) * torch.finfo(q.dtype).min
+
+            if FLASH_ATTN_AVAILABLE and attention_mask is None:
                 # FlashAttention-2 with NO causal mask (bidirectional)
+                # Note: flash_attn doesn't support arbitrary attention masks
                 out = flash_attn_func(
                     q,
                     k,
@@ -176,13 +190,20 @@ class BidirectionalAttention(nn.Module):
                     causal=False,
                 )
             else:
-                # PyTorch SDPA fallback
-                out = sdpa_attention(
-                    q, k, v,
-                    dropout_p=self.dropout,
-                    causal=False,
-                    training=self.training,
+                # PyTorch SDPA fallback (supports attention mask)
+                # Transpose for SDPA: (B, T, H, D) -> (B, H, T, D)
+                q_sdpa = q.transpose(1, 2)
+                k_sdpa = k.transpose(1, 2)
+                v_sdpa = v.transpose(1, 2)
+
+                out = F.scaled_dot_product_attention(
+                    q_sdpa, k_sdpa, v_sdpa,
+                    attn_mask=attn_mask,
+                    dropout_p=self.dropout if self.training else 0.0,
+                    is_causal=False,
                 )
+                # Transpose back: (B, H, T, D) -> (B, T, H, D)
+                out = out.transpose(1, 2)
 
             # Reshape and project output
             out = out.view(B, T, self.d_model)

@@ -102,8 +102,9 @@ class HybridBiMambaEncoder(nn.Module):
 
         Args:
             input_ids: Token IDs (batch, seq_len)
-            attention_mask: Optional attention mask (batch, seq_len)
-                           Currently not used as BiMamba handles this implicitly
+            attention_mask: Optional attention mask (batch, seq_len).
+                           True/1 = attend, False/0 = mask (padding).
+                           Applied to attention layers to prevent attending to padding.
 
         Returns:
             Encoder output (batch, seq_len, d_model)
@@ -117,11 +118,23 @@ class HybridBiMambaEncoder(nn.Module):
         # Apply hybrid layers
         for layer, layer_type in zip(self.layers, self.layer_types):
             if self._gradient_checkpointing and self.training:
-                x = torch.utils.checkpoint.checkpoint(
-                    layer, x, use_reentrant=False
-                )
+                if layer_type == LayerType.ATTENTION:
+                    # Pass attention_mask to attention layers
+                    x = torch.utils.checkpoint.checkpoint(
+                        layer, x, attention_mask, use_reentrant=False
+                    )
+                else:
+                    # BiMamba layers don't use attention_mask
+                    x = torch.utils.checkpoint.checkpoint(
+                        layer, x, use_reentrant=False
+                    )
             else:
-                x = layer(x)
+                if layer_type == LayerType.ATTENTION:
+                    # Pass attention_mask to attention layers
+                    x = layer(x, attention_mask=attention_mask)
+                else:
+                    # BiMamba layers don't use attention_mask
+                    x = layer(x)
 
         # Final normalization
         x = self.final_norm(x)

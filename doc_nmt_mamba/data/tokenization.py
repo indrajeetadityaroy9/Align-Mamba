@@ -67,6 +67,33 @@ class CustomBPETokenizer:
     def vocab_size(self) -> int:
         return self.tokenizer.get_vocab_size()
 
+    def __call__(
+        self,
+        text: Union[str, List[str]],
+        padding: bool = True,
+        truncation: bool = True,
+        max_length: Optional[int] = None,
+        return_tensors: Optional[str] = "pt",
+    ) -> Dict[str, torch.Tensor]:
+        """
+        HuggingFace-compatible interface for encoding text.
+
+        Args:
+            text: Text or list of texts to encode
+            padding: Whether to pad sequences (default: True)
+            truncation: Whether to truncate sequences (default: True)
+            max_length: Maximum sequence length
+            return_tensors: "pt" for PyTorch tensors, None for lists
+
+        Returns:
+            Dictionary with 'input_ids' and 'attention_mask'
+        """
+        return self.encode_source(
+            text,
+            max_length=max_length,
+            return_tensors=(return_tensors == "pt"),
+        )
+
     def encode_source(
         self,
         text: Union[str, List[str]],

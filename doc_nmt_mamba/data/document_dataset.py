@@ -7,6 +7,7 @@ Handles document boundaries and provides document-aware sampling.
 from typing import List, Dict, Optional, Tuple, Union
 from pathlib import Path
 import random
+import hashlib
 
 import torch
 from torch.utils.data import Dataset, IterableDataset
@@ -14,6 +15,35 @@ from datasets import load_dataset
 
 from .tokenization import NMTTokenizer
 from .augmentation import ConcatenationAugmenter, DocumentSample
+
+
+def get_split_hash(text: str, seed: int = 42, val_ratio: float = 0.05, test_ratio: float = 0.05) -> str:
+    """
+    Determine split for a sample using deterministic hashing.
+
+    This ensures stable splits even if the dataset is updated or reordered.
+    Uses first 100 chars of text + seed to compute hash.
+
+    Args:
+        text: Sample text (uses first 100 chars)
+        seed: Random seed for reproducibility
+        val_ratio: Fraction for validation set
+        test_ratio: Fraction for test set
+
+    Returns:
+        Split name: "train", "validation", or "test"
+    """
+    # Use first 100 chars to avoid hashing very long texts
+    text_key = text[:100] if len(text) > 100 else text
+    hash_input = f"{text_key}{seed}".encode('utf-8')
+    h = int(hashlib.md5(hash_input).hexdigest(), 16)
+    r = h / (2**128)  # Normalize to [0, 1)
+
+    if r < test_ratio:
+        return "test"
+    elif r < test_ratio + val_ratio:
+        return "validation"
+    return "train"
 
 
 class DocumentNMTDataset(Dataset):
@@ -95,6 +125,19 @@ class DocumentNMTDataset(Dataset):
                 tgt_sentences=self.tgt_texts,
             )
             return self.augmenter.augment_document(doc)
+
+    def set_epoch(self, epoch: int) -> None:
+        """
+        Set epoch for reproducible augmentation.
+
+        Delegates to the augmenter if one exists. Should be called at
+        the start of each epoch to ensure reproducibility across runs.
+
+        Args:
+            epoch: Current epoch number
+        """
+        if self.augmenter is not None and hasattr(self.augmenter, 'set_epoch'):
+            self.augmenter.set_epoch(epoch)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -248,33 +291,33 @@ class OPUSBooksDataset(DocumentNMTDataset):
         # Load OPUS Books dataset
         dataset = load_dataset("opus_books", "de-en", split="train", cache_dir=cache_dir)
 
-        # OPUS Books only has train split, so we create val/test from it
-        total_len = len(dataset)
-        val_size = int(total_len * val_ratio)
-        test_size = val_size
+        # Use hash-based splitting for stable train/val/test assignment
+        # This ensures splits are consistent even if dataset order changes
+        test_ratio = val_ratio  # Same ratio for test as validation
 
-        if split == "train":
-            indices = range(0, total_len - val_size - test_size)
-        elif split == "validation":
-            indices = range(total_len - val_size - test_size, total_len - test_size)
-        else:  # test
-            indices = range(total_len - test_size, total_len)
-
-        # Extract texts while PRESERVING ORDER (critical for document boundaries)
+        # Extract texts using hash-based split (preserves order within each split)
         src_texts = []
         tgt_texts = []
         doc_boundaries = [0]  # Track document boundaries
 
-        current_doc_prefix = None
-        for i in indices:
+        for i in range(len(dataset)):
             item = dataset[i]
             de_text = item["translation"]["de"]
             en_text = item["translation"]["en"]
 
-            # Detect document boundaries from ID patterns
-            # OPUS Books IDs indicate book/chapter changes
-            item_id = item.get("id", str(i))
+            # Determine split using hash of text content (stable across dataset versions)
+            sample_split = get_split_hash(
+                en_text,  # Use target text for hashing
+                seed=42,
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
+            )
 
+            # Only include samples belonging to requested split
+            if sample_split != split:
+                continue
+
+            # Detect document boundaries from ID patterns
             # Simple heuristic: new document if we see metadata patterns
             is_metadata = (
                 "Source:" in en_text or
@@ -335,19 +378,28 @@ class NewsCommentaryDataset(DocumentNMTDataset):
         """
         dataset = load_dataset("news_commentary", "de-en", split="train", cache_dir=cache_dir)
 
-        total_len = len(dataset)
-        val_size = int(total_len * val_ratio)
-        test_size = val_size
+        # Use hash-based splitting for stable train/val/test assignment
+        test_ratio = val_ratio
 
-        if split == "train":
-            indices = range(0, total_len - val_size - test_size)
-        elif split == "validation":
-            indices = range(total_len - val_size - test_size, total_len - test_size)
-        else:
-            indices = range(total_len - test_size, total_len)
+        src_texts = []
+        tgt_texts = []
 
-        src_texts = [dataset[i]["translation"]["de"] for i in indices]
-        tgt_texts = [dataset[i]["translation"]["en"] for i in indices]
+        for i in range(len(dataset)):
+            item = dataset[i]
+            de_text = item["translation"]["de"]
+            en_text = item["translation"]["en"]
+
+            # Determine split using hash of text content
+            sample_split = get_split_hash(
+                en_text,
+                seed=42,
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
+            )
+
+            if sample_split == split:
+                src_texts.append(de_text)
+                tgt_texts.append(en_text)
 
         # News articles: treat every N sentences as a "document" for CAT-N
         # This approximates article boundaries
