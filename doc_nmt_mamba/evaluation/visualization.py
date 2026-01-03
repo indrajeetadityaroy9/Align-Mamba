@@ -1,43 +1,26 @@
-#!/usr/bin/env python3
 """
-Comparison Plotting for Baseline vs. Thesis Model.
+Publication-Quality Visualization for Document-Level NMT.
 
-Generates publication-quality overlay plots comparing:
-- Transformer Baseline vs. Hybrid Mamba-Attention
-
-This script addresses "Risk B: Single Point Evaluation" by producing
-comparative plots required for scientific papers.
-
-Generates:
+Generates figures for NeurIPS/ICML/ACL papers:
 - Figure 2: Throughput vs. Sequence Length (Log-Log overlay)
-- Figure 3: Memory vs. Sequence Length (overlay)
-- Figure 4: ContraPro Accuracy vs. Distance (overlay)
-- Table 1: Combined quality metrics (LaTeX)
-
-Usage:
-    python scripts/evaluation/plot_comparison.py \
-        --baseline results/baseline/evaluation_summary.json \
-        --thesis results/thesis/evaluation_summary.json \
-        --output-dir paper/figures
-
-    # With custom labels
-    python scripts/evaluation/plot_comparison.py \
-        --baseline results/baseline/evaluation_summary.json \
-        --thesis results/thesis/evaluation_summary.json \
-        --baseline-label "Transformer (77M)" \
-        --thesis-label "Hybrid Mamba (77M)"
+- Figure 3: Memory vs. Sequence Length
+- Figure 4: ContraPro Accuracy vs. Distance
+- Figure 5: Latency breakdown (TTFT/ITL)
+- Table 1: Quality metrics (LaTeX)
 """
 
-import os
-import sys
 import json
-import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 import numpy as np
-import pandas as pd
+
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
 
 try:
     import matplotlib.pyplot as plt
@@ -46,7 +29,6 @@ try:
     PLOTTING_AVAILABLE = True
 except ImportError:
     PLOTTING_AVAILABLE = False
-    print("Warning: matplotlib/seaborn not installed")
 
 
 # Publication-quality plot settings
@@ -90,7 +72,7 @@ class ModelResults:
 
     # Efficiency data (lists indexed by seq_len)
     seq_lengths: Optional[List[int]] = None
-    throughput: Optional[List[float]] = None  # Tokens per second
+    throughput: Optional[List[float]] = None
     memory_gb: Optional[List[float]] = None
     ttft_ms: Optional[List[float]] = None
     itl_ms: Optional[List[float]] = None
@@ -124,7 +106,6 @@ def load_results(json_path: str, label: str) -> ModelResults:
     # Efficiency metrics
     if 'efficiency' in data.get('results', data):
         e = data.get('results', data).get('efficiency', {})
-        # Try to load from detailed results
         if 'seq_lengths' in e:
             results.seq_lengths = e['seq_lengths']
             results.throughput = e.get('throughput', e.get('tokens_per_second'))
@@ -143,12 +124,13 @@ def load_results(json_path: str, label: str) -> ModelResults:
 
 def load_efficiency_csv(csv_path: str, label: str) -> ModelResults:
     """Load efficiency results from CSV file."""
-    df = pd.read_csv(csv_path)
+    if not PANDAS_AVAILABLE:
+        raise ImportError("pandas required for CSV loading")
 
-    # Filter for batch_size=1 for cleaner plots
+    df = pd.read_csv(csv_path)
     df_bs1 = df[df['batch_size'] == 1].sort_values('seq_len')
 
-    results = ModelResults(
+    return ModelResults(
         name=Path(csv_path).stem,
         label=label,
         seq_lengths=df_bs1['seq_len'].tolist(),
@@ -158,26 +140,19 @@ def load_efficiency_csv(csv_path: str, label: str) -> ModelResults:
         itl_ms=df_bs1['inter_token_latency_ms'].tolist(),
     )
 
-    return results
-
 
 def plot_throughput_comparison(
     baseline: ModelResults,
     thesis: ModelResults,
     output_path: Path,
 ) -> None:
-    """
-    Generate Figure 2: Throughput vs. Sequence Length (Log-Log).
-
-    This is the "Money Chart" showing Mamba's linear scaling advantage.
-    """
+    """Generate Figure 2: Throughput vs. Sequence Length (Log-Log)."""
     if not PLOTTING_AVAILABLE:
         return
 
     plt.rcParams.update(PLOT_STYLE)
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Plot baseline (Transformer)
     if baseline.seq_lengths and baseline.throughput:
         ax.loglog(
             baseline.seq_lengths, baseline.throughput,
@@ -186,7 +161,6 @@ def plot_throughput_comparison(
             label=baseline.label,
         )
 
-    # Plot thesis (Mamba)
     if thesis.seq_lengths and thesis.throughput:
         ax.loglog(
             thesis.seq_lengths, thesis.throughput,
@@ -195,32 +169,25 @@ def plot_throughput_comparison(
             label=thesis.label,
         )
 
-    # Add theoretical scaling lines
+    # Theoretical scaling lines
     if thesis.seq_lengths:
         x = np.array(thesis.seq_lengths)
-        # O(L^2) reference line
         y_quad = thesis.throughput[0] * (thesis.seq_lengths[0] / x) ** 2
         ax.loglog(x, y_quad, '--', color='gray', alpha=0.5, label=r'$O(L^2)$ scaling')
-        # O(L) reference line
         y_lin = thesis.throughput[0] * (thesis.seq_lengths[0] / x)
         ax.loglog(x, y_lin, ':', color='gray', alpha=0.5, label=r'$O(L)$ scaling')
 
     ax.set_xlabel('Sequence Length (tokens)', fontsize=14)
     ax.set_ylabel('Throughput (tokens/second)', fontsize=14)
     ax.set_title('Inference Throughput vs. Sequence Length\n(Batch Size = 1, H100 80GB)', fontsize=14)
-
     ax.legend(loc='upper right', fontsize=11)
     ax.grid(True, alpha=0.3, which='both')
-
-    # Set nice log ticks
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: f'{int(x):,}'))
 
     plt.tight_layout()
     plt.savefig(output_path / 'figure2_throughput.pdf', dpi=300, bbox_inches='tight')
     plt.savefig(output_path / 'figure2_throughput.png', dpi=150, bbox_inches='tight')
     plt.close()
-
-    print(f"  Saved: figure2_throughput.pdf")
 
 
 def plot_memory_comparison(
@@ -235,7 +202,6 @@ def plot_memory_comparison(
     plt.rcParams.update(PLOT_STYLE)
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Plot baseline
     if baseline.seq_lengths and baseline.memory_gb:
         ax.plot(
             baseline.seq_lengths, baseline.memory_gb,
@@ -244,7 +210,6 @@ def plot_memory_comparison(
             label=baseline.label,
         )
 
-    # Plot thesis
     if thesis.seq_lengths and thesis.memory_gb:
         ax.plot(
             thesis.seq_lengths, thesis.memory_gb,
@@ -253,14 +218,12 @@ def plot_memory_comparison(
             label=thesis.label,
         )
 
-    # H100 memory limit
     ax.axhline(y=80, color='red', linestyle='--', alpha=0.7, linewidth=1.5,
                label='H100 80GB Limit')
 
     ax.set_xlabel('Sequence Length (tokens)', fontsize=14)
     ax.set_ylabel('Peak GPU Memory (GB)', fontsize=14)
     ax.set_title('Memory Consumption vs. Sequence Length\n(Batch Size = 1)', fontsize=14)
-
     ax.legend(loc='upper left', fontsize=11)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 85)
@@ -270,26 +233,19 @@ def plot_memory_comparison(
     plt.savefig(output_path / 'figure3_memory.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"  Saved: figure3_memory.pdf")
-
 
 def plot_contrapro_comparison(
     baseline: ModelResults,
     thesis: ModelResults,
     output_path: Path,
 ) -> None:
-    """
-    Generate Figure 4: ContraPro Accuracy vs. Distance.
-
-    Shows context utilization capability of each model.
-    """
+    """Generate Figure 4: ContraPro Accuracy vs. Distance."""
     if not PLOTTING_AVAILABLE:
         return
 
     plt.rcParams.update(PLOT_STYLE)
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Distance bucket centers
     bucket_centers = {
         "0-50": 25, "51-100": 75, "101-200": 150,
         "201-500": 350, "501-1000": 750, "1000+": 1500
@@ -303,26 +259,22 @@ def plot_contrapro_comparison(
                 y.append(acc * 100)
         return x, y
 
-    # Plot baseline
     if baseline.contrapro_by_distance:
         x, y = extract_xy(baseline.contrapro_by_distance)
         ax.plot(x, y, marker=MARKERS['baseline'], color=COLORS['baseline'],
                linewidth=2.5, markersize=10, label=baseline.label)
 
-    # Plot thesis
     if thesis.contrapro_by_distance:
         x, y = extract_xy(thesis.contrapro_by_distance)
         ax.plot(x, y, marker=MARKERS['thesis'], color=COLORS['thesis'],
                linewidth=2.5, markersize=10, label=thesis.label)
 
-    # Random baseline
     ax.axhline(y=50, color=COLORS['random'], linestyle='--', alpha=0.7,
                linewidth=1.5, label='Random Baseline (50%)')
 
     ax.set_xlabel('Antecedent Distance (tokens)', fontsize=14)
     ax.set_ylabel('Pronoun Disambiguation Accuracy (%)', fontsize=14)
     ax.set_title('Context Utilization: Accuracy vs. Antecedent Distance', fontsize=14)
-
     ax.legend(loc='lower left', fontsize=11)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(40, 100)
@@ -332,8 +284,6 @@ def plot_contrapro_comparison(
     plt.savefig(output_path / 'figure4_contrapro.pdf', dpi=300, bbox_inches='tight')
     plt.savefig(output_path / 'figure4_contrapro.png', dpi=150, bbox_inches='tight')
     plt.close()
-
-    print(f"  Saved: figure4_contrapro.pdf")
 
 
 def plot_latency_breakdown(
@@ -385,14 +335,12 @@ def plot_latency_breakdown(
     plt.savefig(output_path / 'figure5_latency.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"  Saved: figure5_latency.pdf")
-
 
 def generate_quality_table(
     baseline: ModelResults,
     thesis: ModelResults,
     output_path: Path,
-) -> None:
+) -> str:
     """Generate Table 1: Translation Quality Comparison (LaTeX)."""
 
     def fmt_metric(val, ci=None):
@@ -405,11 +353,8 @@ def generate_quality_table(
     def fmt_comet(val, ci=None):
         if val is None:
             return "N/A"
-        if ci:
-            return f"{val:.4f}"
         return f"{val:.4f}"
 
-    # Determine winners
     bleu_winner = None
     if baseline.bleu and thesis.bleu:
         bleu_winner = 'thesis' if thesis.bleu > baseline.bleu else 'baseline'
@@ -418,7 +363,6 @@ def generate_quality_table(
     if baseline.comet and thesis.comet:
         comet_winner = 'thesis' if thesis.comet > baseline.comet else 'baseline'
 
-    # Generate LaTeX
     latex = r"""
 \begin{table}[t]
 \centering
@@ -431,7 +375,6 @@ Best scores in \textbf{bold}. 95\% confidence intervals from paired bootstrap re
 \midrule
 """
 
-    # Baseline row
     bleu_base = fmt_metric(baseline.bleu, baseline.bleu_ci)
     comet_base = fmt_comet(baseline.comet, baseline.comet_ci)
     chrf_base = fmt_metric(baseline.chrf)
@@ -443,7 +386,6 @@ Best scores in \textbf{bold}. 95\% confidence intervals from paired bootstrap re
 
     latex += f"{baseline.label} & 77M & {bleu_base} & {comet_base} & {chrf_base} \\\\\n"
 
-    # Thesis row
     bleu_thesis = fmt_metric(thesis.bleu, thesis.bleu_ci)
     comet_thesis = fmt_comet(thesis.comet, thesis.comet_ci)
     chrf_thesis = fmt_metric(thesis.chrf)
@@ -461,92 +403,42 @@ Best scores in \textbf{bold}. 95\% confidence intervals from paired bootstrap re
 \end{table}
 """
 
-    # Save
     table_path = output_path / 'table1_quality.tex'
     with open(table_path, 'w') as f:
         f.write(latex)
 
-    print(f"  Saved: table1_quality.tex")
-
-    # Also print for quick viewing
-    print("\n" + "="*70)
-    print("TABLE 1: TRANSLATION QUALITY COMPARISON")
-    print("="*70)
-    print(f"{'Model':<30} {'BLEU':>12} {'COMET':>12} {'ChrF++':>12}")
-    print("-"*70)
-    print(f"{baseline.label:<30} {fmt_metric(baseline.bleu):>12} {fmt_comet(baseline.comet):>12} {fmt_metric(baseline.chrf):>12}")
-    print(f"{thesis.label:<30} {fmt_metric(thesis.bleu):>12} {fmt_comet(thesis.comet):>12} {fmt_metric(thesis.chrf):>12}")
-    print("="*70)
+    return latex
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate Comparison Plots")
-    parser.add_argument("--baseline", type=str, required=True,
-                       help="Path to baseline evaluation_summary.json")
-    parser.add_argument("--thesis", type=str, required=True,
-                       help="Path to thesis evaluation_summary.json")
-    parser.add_argument("--output-dir", type=str, default="paper/figures",
-                       help="Output directory for figures")
-    parser.add_argument("--baseline-label", type=str, default="Transformer Baseline",
-                       help="Label for baseline model in plots")
-    parser.add_argument("--thesis-label", type=str, default="Hybrid Mamba-Attention",
-                       help="Label for thesis model in plots")
-    parser.add_argument("--efficiency-csv-baseline", type=str,
-                       help="Optional: efficiency_results.csv for baseline (more detailed)")
-    parser.add_argument("--efficiency-csv-thesis", type=str,
-                       help="Optional: efficiency_results.csv for thesis (more detailed)")
-
-    args = parser.parse_args()
-
-    output_path = Path(args.output_dir)
+def generate_all_figures(
+    baseline_path: str,
+    thesis_path: str,
+    output_dir: str,
+    baseline_label: str = "Transformer Baseline",
+    thesis_label: str = "Hybrid Mamba-Attention",
+) -> None:
+    """Generate all publication figures from evaluation results."""
+    output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    print("\n" + "="*60)
-    print("GENERATING COMPARISON PLOTS")
-    print("="*60)
-    print(f"Baseline: {args.baseline}")
-    print(f"Thesis: {args.thesis}")
-    print(f"Output: {args.output_dir}")
-    print("="*60 + "\n")
+    baseline = load_results(baseline_path, baseline_label)
+    thesis = load_results(thesis_path, thesis_label)
 
-    # Load results
-    baseline = load_results(args.baseline, args.baseline_label)
-    thesis = load_results(args.thesis, args.thesis_label)
-
-    # Optionally load more detailed efficiency CSVs
-    if args.efficiency_csv_baseline:
-        eff_baseline = load_efficiency_csv(args.efficiency_csv_baseline, args.baseline_label)
-        baseline.seq_lengths = eff_baseline.seq_lengths
-        baseline.throughput = eff_baseline.throughput
-        baseline.memory_gb = eff_baseline.memory_gb
-        baseline.ttft_ms = eff_baseline.ttft_ms
-        baseline.itl_ms = eff_baseline.itl_ms
-
-    if args.efficiency_csv_thesis:
-        eff_thesis = load_efficiency_csv(args.efficiency_csv_thesis, args.thesis_label)
-        thesis.seq_lengths = eff_thesis.seq_lengths
-        thesis.throughput = eff_thesis.throughput
-        thesis.memory_gb = eff_thesis.memory_gb
-        thesis.ttft_ms = eff_thesis.ttft_ms
-        thesis.itl_ms = eff_thesis.itl_ms
-
-    # Generate all plots
-    print("Generating plots...")
+    print("Generating figures...")
 
     if baseline.seq_lengths or thesis.seq_lengths:
         plot_throughput_comparison(baseline, thesis, output_path)
+        print("  Saved: figure2_throughput.pdf")
         plot_memory_comparison(baseline, thesis, output_path)
+        print("  Saved: figure3_memory.pdf")
         plot_latency_breakdown(baseline, thesis, output_path)
+        print("  Saved: figure5_latency.pdf")
 
     if baseline.contrapro_by_distance or thesis.contrapro_by_distance:
         plot_contrapro_comparison(baseline, thesis, output_path)
+        print("  Saved: figure4_contrapro.pdf")
 
-    # Generate quality table
-    print("\nGenerating tables...")
     generate_quality_table(baseline, thesis, output_path)
+    print("  Saved: table1_quality.tex")
 
     print(f"\nAll artifacts saved to: {output_path}")
-
-
-if __name__ == "__main__":
-    main()

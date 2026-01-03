@@ -51,6 +51,11 @@ class DistributedConfig:
     gradient_as_bucket_view: bool = True
     static_graph: bool = True  # Enable for torch.compile compatibility
 
+    # H100 NVLink Optimization: Larger bucket size for fewer NCCL calls
+    # NVLink is extremely fast, so larger buckets reduce synchronization overhead
+    # 512MB optimal for high-bandwidth NVLink on H100 SXM5
+    bucket_cap_mb: int = 512  # Default 25MB, 512MB for NVLink
+
     # FSDP settings
     sharding_strategy: str = "full_shard"  # "full_shard", "shard_grad_op", "no_shard"
     cpu_offload: bool = False
@@ -210,12 +215,15 @@ def wrap_model_distributed(
         model = model.to(device)
 
         # Wrap with DDP
+        # H100 NVLink Optimization: Larger bucket_cap_mb reduces NCCL calls
+        # NVLink bandwidth is so high that fewer, larger allreduces are faster
         model = DDP(
             model,
             device_ids=[device.index] if device.type == "cuda" else None,
             find_unused_parameters=config.find_unused_parameters,
             gradient_as_bucket_view=config.gradient_as_bucket_view,
             static_graph=config.static_graph,
+            bucket_cap_mb=config.bucket_cap_mb,  # H100 NVLink optimization
         )
 
     elif strategy in (DistributedStrategy.FSDP, DistributedStrategy.FSDP_FULL):

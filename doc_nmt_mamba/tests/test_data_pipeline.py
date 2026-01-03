@@ -19,9 +19,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from data.collation import LabelShiftCollator, PackedSequenceCollator, PaddedSequenceCollator
-from data.document_dataset import get_split_hash
-from data.augmentation import ConcatenationAugmenter, DocumentSample
+from data.collator import LabelShiftCollator, PackedSequenceCollator, PaddedSequenceCollator, ConcatenationAugmenter, DocumentSample
+from data.dataset import get_split_hash
 
 
 class TestLabelShifting:

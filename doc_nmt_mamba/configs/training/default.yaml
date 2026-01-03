@@ -1,56 +1,118 @@
-# Default training configuration for H100 80GB
+# Default training configuration for 2x H100 80GB SXM5
+# Optimized for maximum throughput on high-end hardware
 
-# Training loop
+# =============================================================================
+# Batch Size - AGGRESSIVE SCALING
+# =============================================================================
+# 200M model uses ~2GB VRAM. With 80GB per GPU, maximize batch size
+# to saturate H100 compute throughput and avoid GPU starvation.
+per_device_train_batch_size: 128  # Start here, can push to 256 for shorter sequences
+gradient_accumulation_steps: 1    # Disable accumulation for speed (set to 1)
+per_device_eval_batch_size: 256   # Larger for faster eval
+
+# Legacy alias (for backward compatibility)
+batch_size: 128
+
+# =============================================================================
+# Training Loop
+# =============================================================================
 max_steps: 100000
-batch_size: 64  # H100 80GB enables larger batch (per GPU in distributed)
-gradient_accumulation_steps: 1
 max_grad_norm: 1.0
 
+# =============================================================================
 # Optimization
+# =============================================================================
 # LR scaled for DDP: 2x GPUs = 2x effective batch = ~sqrt(2) or 2x LR
-learning_rate: 2e-4  # Scaled from 1e-4 for DDP (2x batch size)
+learning_rate: 2e-4  # Scaled from 1e-4 for DDP with 2x batch
 weight_decay: 0.01
-betas: [0.9, 0.95]
+betas: [0.9, 0.95]   # Slightly higher beta2 for stability with large batches
+eps: 1e-8
 
-# Scheduling
+# Fused optimizer - CRITICAL FOR H100
+# Runs entire optimizer step on GPU without CPU round-trips (~5-10% speedup)
+use_fused_optimizer: true
+
+# =============================================================================
+# Learning Rate Schedule
+# =============================================================================
 scheduler_type: cosine
 warmup_steps: 4000
 min_lr: 1e-6
 
-# Memory optimization
-gradient_checkpointing: true
-use_bf16: true  # BF16 for H100 (no scaling needed)
+# =============================================================================
+# Precision - H100 NATIVE BF16
+# =============================================================================
+# NEVER use fp16 on H100 (overflow risk). BF16 is native and optimal.
+mixed_precision: bf16
+use_bf16: true
 
-# torch.compile
+# =============================================================================
+# torch.compile - FREE PERFORMANCE
+# =============================================================================
+# H100 + Inductor + cudagraphs = ~20-30% speedup
 use_compile: true
-compile_mode: max-autotune
+torch_compile: true
+compile_mode: max-autotune  # Aggressive optimization (longer startup, faster runtime)
 
-# H100 optimizations
-tf32_matmul: true
-cudnn_benchmark: true
-channels_last: true  # Use channels-last memory format for potential speedup
+# =============================================================================
+# H100 Hardware Optimizations
+# =============================================================================
+tf32_matmul: true           # ~3x speedup on FP32 math
+matmul_precision: high      # BF16 accumulation for Tensor Cores
+cudnn_benchmark: true       # Autotune convolutions
+channels_last: true         # Memory format optimization
 
-# Distributed training (for multi-GPU)
-# Strategy: "none" (single GPU), "ddp" (DataParallel), "fsdp" (FullyShard), "fsdp_full"
+# =============================================================================
+# DataLoader - LEVERAGING 52 vCPUs + 450GB RAM
+# =============================================================================
+# 16 workers per GPU = 32 total, leaves 20 vCPUs for OS/overhead
+dataloader_num_workers: 16
+dataloader_pin_memory: true
+dataloader_persistent_workers: true  # Keep workers alive between epochs
+dataloader_prefetch_factor: 4        # Aggressive prefetching (450GB RAM)
+dataloader_drop_last: true           # Consistent batch sizes
+
+# =============================================================================
+# Memory Optimization
+# =============================================================================
+gradient_checkpointing: true  # Enable for 8K sequences
+empty_cache_steps: 1000       # Periodic cache clearing
+
+# =============================================================================
+# Distributed Training (2x H100 NVLink)
+# =============================================================================
 distributed_strategy: ddp
 find_unused_parameters: false  # Faster if all params used
-static_graph: true  # Enable for torch.compile compatibility
-fsdp_sharding: full_shard  # For FSDP: "full_shard", "shard_grad_op", "no_shard"
-fsdp_cpu_offload: false  # Enable if running out of GPU memory
+static_graph: true             # Enable for torch.compile compatibility
+gradient_as_bucket_view: true  # Memory optimization
+bucket_cap_mb: 512             # Large buckets for high-bandwidth NVLink (H100 SXM5)
 
-# Logging and checkpointing
+# FSDP settings (if using FSDP instead of DDP)
+fsdp_sharding: full_shard
+fsdp_cpu_offload: false        # Not needed with 80GB VRAM
+
+# =============================================================================
+# Logging and Checkpointing
+# =============================================================================
 log_steps: 100
 eval_steps: 1000
 save_steps: 5000
 save_total_limit: 3
 output_dir: outputs
 
+# =============================================================================
 # Regularization
+# =============================================================================
 label_smoothing: 0.1
+dropout: 0.1
 
+# =============================================================================
 # Reproducibility
+# =============================================================================
 seed: 42
-deterministic: false  # True slows down training
+deterministic: false  # True slows down training by 10-20%
 
+# =============================================================================
 # Resume
+# =============================================================================
 resume_from: null

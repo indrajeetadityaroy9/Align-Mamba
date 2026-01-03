@@ -2,7 +2,7 @@
 # Uses Hydra's defaults system for composability
 
 defaults:
-  - model: medium
+  - model: hybrid_medium
   - training: default
   - data: iwslt14_de_en
   - _self_

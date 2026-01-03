@@ -7,6 +7,12 @@ Run with: python -m pytest tests/test_models.py -v
 import pytest
 import torch
 import torch.nn as nn
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 # Check if mamba-ssm is available
 try:
@@ -25,48 +31,44 @@ DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 class TestImports:
     """Test that all model components can be imported."""
 
-    def test_mamba2_imports(self):
-        from models.mamba2 import RMSNorm, Mamba2BlockWrapper, BiMambaBlock
+    def test_layers_imports(self):
+        from models.layers import RMSNorm, RotaryPositionalEmbedding
         assert RMSNorm is not None
+        assert RotaryPositionalEmbedding is not None
+
+    def test_attention_imports(self):
+        from models.layers import (
+            BidirectionalAttention,
+            CausalSelfAttention,
+            FlashCrossAttention,
+        )
+        assert BidirectionalAttention is not None
+        assert CausalSelfAttention is not None
+        assert FlashCrossAttention is not None
+
+    @requires_mamba
+    def test_mamba_imports(self):
+        from models.layers import Mamba2BlockWrapper, BiMambaBlock
         assert Mamba2BlockWrapper is not None
         assert BiMambaBlock is not None
 
-    def test_attention_imports(self):
-        from models.attention import (
-            RotaryPositionalEmbedding,
-            FlashCrossAttention,
-            CausalSelfAttention,
-            BidirectionalAttention,
-        )
-        assert RotaryPositionalEmbedding is not None
-        assert FlashCrossAttention is not None
-        assert CausalSelfAttention is not None
-        assert BidirectionalAttention is not None
-
-    def test_hybrid_imports(self):
-        from models.hybrid import (
+    def test_modeling_imports(self):
+        from models.modeling_hybrid import (
             LayerType,
-            compute_attention_positions,
-            build_encoder_layers,
-            build_decoder_layers,
-            HybridBiMambaEncoder,
-            HybridMambaDecoder,
+            ModelConfig,
         )
         assert LayerType is not None
-        assert compute_attention_positions is not None
-        assert build_encoder_layers is not None
-        assert build_decoder_layers is not None
-        assert HybridBiMambaEncoder is not None
-        assert HybridMambaDecoder is not None
+        assert ModelConfig is not None
 
-    def test_encoder_decoder_imports(self):
-        from models.encoder_decoder import (
-            ModelConfig,
-            HybridCacheParams,
+    @requires_mamba
+    def test_full_model_imports(self):
+        from models.modeling_hybrid import (
+            HybridBiMambaEncoder,
+            HybridMambaDecoder,
             HybridMambaEncoderDecoder,
         )
-        assert ModelConfig is not None
-        assert HybridCacheParams is not None
+        assert HybridBiMambaEncoder is not None
+        assert HybridMambaDecoder is not None
         assert HybridMambaEncoderDecoder is not None
 
 
@@ -74,14 +76,14 @@ class TestRMSNorm:
     """Test RMSNorm implementation."""
 
     def test_forward_shape(self):
-        from models.mamba2 import RMSNorm
+        from models.layers import RMSNorm
         norm = RMSNorm(768).to(DEVICE)
         x = torch.randn(2, 128, 768, device=DEVICE)
         out = norm(x)
         assert out.shape == x.shape
 
     def test_normalization(self):
-        from models.mamba2 import RMSNorm
+        from models.layers import RMSNorm
         norm = RMSNorm(768).to(DEVICE)
         x = torch.randn(2, 128, 768, device=DEVICE)
         out = norm(x)
@@ -94,7 +96,7 @@ class TestRoPE:
     """Test Rotary Positional Embedding."""
 
     def test_forward_shape(self):
-        from models.attention import RotaryPositionalEmbedding
+        from models.layers import RotaryPositionalEmbedding
         rope = RotaryPositionalEmbedding(dim=64, max_seq_len=1024, device=DEVICE)
         q = torch.randn(2, 12, 128, 64, device=DEVICE)
         k = torch.randn(2, 12, 128, 64, device=DEVICE)
@@ -103,7 +105,7 @@ class TestRoPE:
         assert k_rot.shape == k.shape
 
     def test_with_offset(self):
-        from models.attention import RotaryPositionalEmbedding
+        from models.layers import RotaryPositionalEmbedding
         rope = RotaryPositionalEmbedding(dim=64, max_seq_len=1024, device=DEVICE)
         q = torch.randn(2, 12, 1, 64, device=DEVICE)
         k = torch.randn(2, 12, 1, 64, device=DEVICE)
@@ -116,8 +118,9 @@ class TestRoPE:
 class TestMamba2Wrapper:
     """Test Mamba2 block wrapper."""
 
+    @requires_mamba
     def test_forward_shape(self):
-        from models.mamba2 import Mamba2BlockWrapper
+        from models.layers import Mamba2BlockWrapper
         block = Mamba2BlockWrapper(
             d_model=256,
             d_state=64,
@@ -128,8 +131,9 @@ class TestMamba2Wrapper:
         out = block(x)
         assert out.shape == x.shape
 
+    @requires_mamba
     def test_residual_connection(self):
-        from models.mamba2 import Mamba2BlockWrapper
+        from models.layers import Mamba2BlockWrapper
         block = Mamba2BlockWrapper(
             d_model=256,
             d_state=64,
@@ -146,8 +150,9 @@ class TestMamba2Wrapper:
 class TestBiMamba:
     """Test BiMamba block for encoder."""
 
+    @requires_mamba
     def test_forward_shape(self):
-        from models.mamba2 import BiMambaBlock
+        from models.layers import BiMambaBlock
         block = BiMambaBlock(
             d_model=256,
             d_state=64,
@@ -164,7 +169,7 @@ class TestAttentionModules:
     """Test attention modules."""
 
     def test_causal_self_attention_shape(self):
-        from models.attention import CausalSelfAttention
+        from models.layers import CausalSelfAttention
         attn = CausalSelfAttention(
             d_model=256,
             n_heads=4,
@@ -176,7 +181,7 @@ class TestAttentionModules:
         assert out.shape == x.shape
 
     def test_bidirectional_attention_shape(self):
-        from models.attention import BidirectionalAttention
+        from models.layers import BidirectionalAttention
         attn = BidirectionalAttention(
             d_model=256,
             n_heads=4,
@@ -188,7 +193,7 @@ class TestAttentionModules:
         assert out.shape == x.shape
 
     def test_cross_attention_shape(self):
-        from models.attention import FlashCrossAttention
+        from models.layers import FlashCrossAttention
         attn = FlashCrossAttention(
             d_model=256,
             n_heads=4,
@@ -201,60 +206,26 @@ class TestAttentionModules:
         assert out.shape == x.shape
 
 
-class TestLayerBuilder:
-    """Test hybrid layer building functions."""
+class TestLayerType:
+    """Test LayerType enum and utilities."""
 
-    def test_compute_attention_positions(self):
-        from models.hybrid import compute_attention_positions
+    def test_layer_type_enum(self):
+        from models.modeling_hybrid import LayerType, count_layer_types
 
-        # 16 layers with 1:7 ratio should give 2 attention layers
-        positions = compute_attention_positions(16, 0.125)
-        assert len(positions) == 2
-        # Should include middle and final
-        assert 8 in positions  # middle
-        assert 15 in positions  # final
-
-    @requires_mamba
-    def test_build_encoder_layers(self):
-        from models.hybrid import build_encoder_layers, LayerType
-
-        layers, layer_types = build_encoder_layers(
-            n_layers=8,
-            d_model=256,
-            d_state=64,
-            n_heads=4,
-            attention_ratio=0.125,
-        )
-        assert len(layers) == 8
-        assert len(layer_types) == 8
-        # Should have some BIMAMBA and some ATTENTION
-        assert LayerType.BIMAMBA in layer_types
-        assert LayerType.ATTENTION in layer_types
-
-    @requires_mamba
-    def test_build_decoder_layers(self):
-        from models.hybrid import build_decoder_layers, LayerType
-
-        layers, layer_types = build_decoder_layers(
-            n_layers=8,
-            d_model=256,
-            d_state=64,
-            n_heads=4,
-            attention_ratio=0.125,
-            cross_attn_every=4,
-        )
-        # Should have more layers due to cross-attention insertions
-        assert len(layers) > 8
-        assert LayerType.MAMBA in layer_types
-        assert LayerType.CROSS_ATTENTION in layer_types
+        types = [LayerType.MAMBA, LayerType.MAMBA, LayerType.HYBRID, LayerType.ATTENTION]
+        counts = count_layer_types(types)
+        assert counts["mamba"] == 2
+        assert counts["hybrid"] == 1
+        assert counts["attention"] == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 class TestHybridEncoder:
     """Test hybrid BiMamba encoder."""
 
+    @requires_mamba
     def test_forward_shape(self):
-        from models.hybrid import HybridBiMambaEncoder
+        from models.modeling_hybrid import HybridBiMambaEncoder
         encoder = HybridBiMambaEncoder(
             vocab_size=1000,
             d_model=256,
@@ -269,21 +240,38 @@ class TestHybridEncoder:
         out = encoder(src_ids)
         assert out.shape == (2, 64, 256)
 
+    @requires_mamba
+    def test_layer_counts(self):
+        from models.modeling_hybrid import HybridBiMambaEncoder
+        encoder = HybridBiMambaEncoder(
+            vocab_size=1000,
+            d_model=256,
+            n_layers=8,
+            d_state=64,
+            n_heads=4,
+            attention_ratio=0.25,
+            device=DEVICE,
+            dtype=DTYPE,
+        )
+        counts = encoder.get_layer_counts()
+        assert counts["bimamba"] > 0
+        assert counts["attention"] > 0
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 class TestHybridDecoder:
     """Test hybrid Mamba decoder."""
 
+    @requires_mamba
     def test_forward_shape(self):
-        from models.hybrid import HybridMambaDecoder
+        from models.modeling_hybrid import HybridMambaDecoder
         decoder = HybridMambaDecoder(
             vocab_size=1000,
             d_model=256,
-            n_layers=4,
+            n_layers=8,
             d_state=64,
             n_heads=4,
-            attention_ratio=0.25,
-            cross_attn_every=2,
+            hybrid_interval=4,
             device=DEVICE,
             dtype=DTYPE,
         )
@@ -292,11 +280,30 @@ class TestHybridDecoder:
         logits = decoder(tgt_ids, encoder_out)
         assert logits.shape == (2, 32, 1000)
 
+    @requires_mamba
+    def test_hybrid_positions(self):
+        from models.modeling_hybrid import HybridMambaDecoder
+        decoder = HybridMambaDecoder(
+            vocab_size=1000,
+            d_model=256,
+            n_layers=24,
+            d_state=64,
+            n_heads=4,
+            hybrid_interval=8,
+            device=DEVICE,
+            dtype=DTYPE,
+        )
+        # Should have HYBRID at positions 0, 8, 16
+        assert 0 in decoder.hybrid_positions
+        assert 8 in decoder.hybrid_positions
+        assert 16 in decoder.hybrid_positions
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 class TestFullModel:
     """Test full encoder-decoder model."""
 
+    @requires_mamba
     def test_model_creation(self):
         from models import ModelConfig, HybridMambaEncoderDecoder
 
@@ -304,15 +311,14 @@ class TestFullModel:
             vocab_size=1000,
             d_model=256,
             encoder_layers=4,
-            decoder_layers=4,
+            decoder_layers=8,
             d_state=64,
             n_heads=4,
-            attention_ratio=0.25,
-            cross_attn_every=2,
         )
         model = HybridMambaEncoderDecoder(config=config, device=DEVICE, dtype=DTYPE)
         assert model is not None
 
+    @requires_mamba
     def test_forward_pass(self):
         from models import ModelConfig, HybridMambaEncoderDecoder
 
@@ -320,11 +326,9 @@ class TestFullModel:
             vocab_size=1000,
             d_model=256,
             encoder_layers=4,
-            decoder_layers=4,
+            decoder_layers=8,
             d_state=64,
             n_heads=4,
-            attention_ratio=0.25,
-            cross_attn_every=2,
         )
         model = HybridMambaEncoderDecoder(config=config, device=DEVICE, dtype=DTYPE)
 
@@ -334,6 +338,7 @@ class TestFullModel:
         logits = model(src_ids, tgt_ids)
         assert logits.shape == (2, 32, 1000)
 
+    @requires_mamba
     def test_encode(self):
         from models import ModelConfig, HybridMambaEncoderDecoder
 
@@ -341,7 +346,7 @@ class TestFullModel:
             vocab_size=1000,
             d_model=256,
             encoder_layers=4,
-            decoder_layers=4,
+            decoder_layers=8,
             d_state=64,
             n_heads=4,
         )
@@ -351,6 +356,7 @@ class TestFullModel:
         encoder_out = model.encode(src_ids)
         assert encoder_out.shape == (2, 64, 256)
 
+    @requires_mamba
     def test_generation_cache(self):
         from models import ModelConfig, HybridMambaEncoderDecoder
 
@@ -358,7 +364,7 @@ class TestFullModel:
             vocab_size=1000,
             d_model=256,
             encoder_layers=4,
-            decoder_layers=4,
+            decoder_layers=8,
             d_state=64,
             n_heads=4,
         )
@@ -373,6 +379,7 @@ class TestFullModel:
         assert "encoder_output" in cache
         assert "seqlen_offset" in cache
 
+    @requires_mamba
     def test_generate_step(self):
         from models import ModelConfig, HybridMambaEncoderDecoder
 
@@ -380,7 +387,7 @@ class TestFullModel:
             vocab_size=1000,
             d_model=256,
             encoder_layers=4,
-            decoder_layers=4,
+            decoder_layers=8,
             d_state=64,
             n_heads=4,
         )
@@ -399,6 +406,7 @@ class TestFullModel:
         assert logits.shape == (2, 1, 1000)
         assert cache["seqlen_offset"] == 1
 
+    @requires_mamba
     def test_generate(self):
         from models import ModelConfig, HybridMambaEncoderDecoder
 
@@ -406,7 +414,7 @@ class TestFullModel:
             vocab_size=1000,
             d_model=256,
             encoder_layers=4,
-            decoder_layers=4,
+            decoder_layers=8,
             d_state=64,
             n_heads=4,
         )
@@ -421,6 +429,7 @@ class TestFullModel:
         assert generated.shape[0] == 2
         assert generated.shape[1] <= 11  # BOS + max_length
 
+    @requires_mamba
     def test_parameter_count(self):
         from models import ModelConfig, HybridMambaEncoderDecoder
 
@@ -428,7 +437,7 @@ class TestFullModel:
             vocab_size=32000,
             d_model=768,
             encoder_layers=16,
-            decoder_layers=16,
+            decoder_layers=24,
             d_state=128,
             n_heads=12,
         )

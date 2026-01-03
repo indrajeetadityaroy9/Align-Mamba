@@ -1,12 +1,11 @@
 """
 Evaluation Framework for Document-Level NMT.
 
-Provides:
-- Standard MT metrics (BLEU, chrF, TER, COMET)
-- Document-level evaluation (ContraPro pronoun accuracy)
-- Named entity recall analysis
-- Length sensitivity analysis
-- Alignment evaluation (AER with SubwordToWordMapper)
+Consolidated structure:
+- metrics.py: BLEU, chrF, TER, COMET scorers
+- analysis.py: ContraPro, Entity, Alignment, Length analysis
+- runner.py: Unified evaluation pipeline orchestration
+- visualization.py: Publication-quality plotting
 
 Key evaluation protocols:
 1. Standard MT: BLEU + COMET on test set
@@ -27,34 +26,51 @@ from .metrics import (
     compute_comet,
 )
 
-from .contrapro import (
+from .analysis import (
+    # Alignment
+    AlignmentResult,
+    SubwordToWordMapper,
+    AlignmentEvaluator,
+    load_awesome_align_alignments,
+    # ContraPro
     ContrastiveExample,
     ContrastiveResult,
     ContrastivePronounEvaluator,
     ContraProDataset,
-    create_synthetic_contrapro_examples,
     evaluate_pronoun_accuracy,
-)
-
-from .entity_recall import (
+    # Entity recall
     EntityRecallResult,
     EntityRecallAnalyzer,
+    SimpleNER,
+    SpaCyNER,
     analyze_entity_recall,
-)
-
-from .length_analysis import (
+    # Length analysis
     LengthAnalysisResult,
     LengthSensitivityAnalyzer,
     ExtrapolationTester,
     analyze_length_sensitivity,
 )
 
-from .alignment import (
-    AlignmentResult,
-    SubwordToWordMapper,
-    AlignmentEvaluator,
-    load_awesome_align_alignments,
-    evaluate_alignment,
+from .runner import (
+    RunnerConfig,
+    QualityResult,
+    EfficiencyResult,
+    ContraProResult,
+    FullEvaluationResult,
+    EvaluationRunner,
+    check_dependencies,
+)
+
+from .visualization import (
+    ModelResults,
+    load_results,
+    load_efficiency_csv,
+    plot_throughput_comparison,
+    plot_memory_comparison,
+    plot_contrapro_comparison,
+    plot_latency_breakdown,
+    generate_quality_table,
+    generate_all_figures,
 )
 
 __all__ = [
@@ -67,26 +83,44 @@ __all__ = [
     "EvaluationSuite",
     "compute_bleu",
     "compute_comet",
+    # Alignment
+    "AlignmentResult",
+    "SubwordToWordMapper",
+    "AlignmentEvaluator",
+    "load_awesome_align_alignments",
     # ContraPro
     "ContrastiveExample",
     "ContrastiveResult",
     "ContrastivePronounEvaluator",
     "ContraProDataset",
-    "create_synthetic_contrapro_examples",
     "evaluate_pronoun_accuracy",
     # Entity recall
     "EntityRecallResult",
     "EntityRecallAnalyzer",
+    "SimpleNER",
+    "SpaCyNER",
     "analyze_entity_recall",
     # Length analysis
     "LengthAnalysisResult",
     "LengthSensitivityAnalyzer",
     "ExtrapolationTester",
     "analyze_length_sensitivity",
-    # Alignment
-    "AlignmentResult",
-    "SubwordToWordMapper",
-    "AlignmentEvaluator",
-    "load_awesome_align_alignments",
-    "evaluate_alignment",
+    # Runner
+    "RunnerConfig",
+    "QualityResult",
+    "EfficiencyResult",
+    "ContraProResult",
+    "FullEvaluationResult",
+    "EvaluationRunner",
+    "check_dependencies",
+    # Visualization
+    "ModelResults",
+    "load_results",
+    "load_efficiency_csv",
+    "plot_throughput_comparison",
+    "plot_memory_comparison",
+    "plot_contrapro_comparison",
+    "plot_latency_breakdown",
+    "generate_quality_table",
+    "generate_all_figures",
 ]

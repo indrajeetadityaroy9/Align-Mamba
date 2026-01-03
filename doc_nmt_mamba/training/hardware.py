@@ -6,6 +6,7 @@ Provides:
 - H100-specific optimizations (TF32, BF16, NVLink, NCCL)
 - CUDA memory management utilities
 - Performance profiling helpers
+- Optimal worker count calculation for high-CPU systems
 """
 
 import os
@@ -17,6 +18,14 @@ import warnings
 
 import torch
 import torch.distributed as dist
+
+# psutil for cross-platform system info
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    warnings.warn("psutil not available. Install with: pip install psutil")
 
 
 @dataclass
@@ -241,9 +250,16 @@ def setup_h100_optimizations(
     enable_flash_sdp: bool = True,
     enable_mem_efficient_sdp: bool = True,
     cuda_alloc_conf: Optional[str] = None,
+    matmul_precision: str = "high",
 ) -> Dict[str, bool]:
     """
-    Apply H100-specific optimizations.
+    Apply H100-specific optimizations for maximum throughput.
+
+    H100 (Hopper) specific optimizations:
+    - TF32/BF16 for Tensor Core acceleration (~3-5x speedup vs FP32)
+    - Flash SDP for memory-efficient attention
+    - High precision matmul (BF16 accumulation)
+    - Optimized CUDA memory allocator
 
     Args:
         enable_tf32: Enable TF32 for matmul (faster, slight precision loss)
@@ -251,25 +267,35 @@ def setup_h100_optimizations(
         enable_flash_sdp: Enable Flash SDP for attention
         enable_mem_efficient_sdp: Enable memory-efficient SDP
         cuda_alloc_conf: Custom CUDA allocator config
+        matmul_precision: Matmul precision ('highest', 'high', 'medium')
+                          'high' = BF16 accumulation, 'medium' = TF32
 
     Returns:
         Dict of applied optimizations
     """
     applied = {}
 
-    # TF32 for faster matmul on Ampere+ GPUs
+    # 1. TF32 for faster matmul on Ampere+ GPUs
+    # H100 gets ~3x speedup on FP32 math with TF32 enabled
     if enable_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         applied["tf32"] = True
 
-    # cuDNN benchmark for optimized convolutions
+    # 2. Set matmul precision for H100 Tensor Cores
+    # 'high' = BF16 accumulation (best for H100)
+    # 'medium' = TF32 (good balance)
+    # 'highest' = FP32 (slowest, most precise)
+    torch.set_float32_matmul_precision(matmul_precision)
+    applied["matmul_precision"] = matmul_precision
+
+    # 3. cuDNN benchmark for optimized convolutions
     if enable_cudnn_benchmark:
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.enabled = True
         applied["cudnn_benchmark"] = True
 
-    # Flash SDP (Scaled Dot Product Attention)
+    # 4. Flash SDP (Scaled Dot Product Attention)
     if enable_flash_sdp:
         torch.backends.cuda.enable_flash_sdp(True)
         applied["flash_sdp"] = True
@@ -278,13 +304,63 @@ def setup_h100_optimizations(
         torch.backends.cuda.enable_mem_efficient_sdp(True)
         applied["mem_efficient_sdp"] = True
 
-    # CUDA memory allocator configuration
+    # 5. CUDA memory allocator configuration
+    # expandable_segments reduces fragmentation for large models
     if cuda_alloc_conf is None:
         cuda_alloc_conf = "expandable_segments:True"
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = cuda_alloc_conf
     applied["cuda_alloc_conf"] = cuda_alloc_conf
 
+    # 6. Check FlashAttention-2 availability (critical for H100 performance)
+    try:
+        from flash_attn import flash_attn_func
+        applied["flash_attn_2"] = True
+        print("FlashAttention-2 is available and optimized for H100.")
+    except ImportError:
+        applied["flash_attn_2"] = False
+        print("WARNING: FlashAttention-2 not found. Using PyTorch SDPA fallback.")
+
     return applied
+
+
+def get_optimal_compiler_backend() -> str:
+    """
+    Get optimal torch.compile backend for current hardware.
+
+    H100 benefits massively from TorchInductor with cudagraphs.
+
+    Returns:
+        Backend name for torch.compile
+    """
+    if is_hopper():
+        return "inductor"  # Best for H100 with cudagraphs
+    elif is_ampere_or_newer():
+        return "inductor"  # Good for A100/A10
+    else:
+        return "inductor"  # Default to inductor
+
+
+def get_optimal_compile_options() -> Dict[str, Any]:
+    """
+    Get optimal torch.compile options for H100.
+
+    Returns:
+        Dict of compile options
+    """
+    options = {
+        "mode": "max-autotune",  # Aggressive optimization
+        "fullgraph": False,      # Allow graph breaks for compatibility
+    }
+
+    if is_hopper():
+        # H100-specific optimizations
+        options["options"] = {
+            "triton.cudagraphs": True,  # Enable CUDA graphs for reduced overhead
+            "epilogue_fusion": True,     # Fuse epilogue operations
+            "max_autotune": True,        # More extensive autotuning
+        }
+
+    return options
 
 
 def setup_nccl_optimizations(
@@ -449,6 +525,120 @@ def is_ampere_or_newer() -> bool:
 def is_hopper() -> bool:
     """Check if GPU is Hopper (compute capability 9.0, e.g., H100)."""
     return get_compute_capability() >= (9, 0)
+
+
+def get_optimal_worker_count(num_gpus: int = 1, reserved_cores: int = 4) -> int:
+    """
+    Calculate optimal dataloader workers based on available CPU cores.
+
+    For 52 vCPU systems, this calculates workers per GPU while leaving
+    cores for OS/overhead.
+
+    Args:
+        num_gpus: Number of GPUs (workers are divided among GPUs)
+        reserved_cores: Cores to reserve for OS/overhead
+
+    Returns:
+        Optimal number of workers per GPU (capped at 16)
+    """
+    if PSUTIL_AVAILABLE:
+        # Use physical cores (not logical/hyperthreaded)
+        total_cores = psutil.cpu_count(logical=False) or 52
+    else:
+        total_cores = os.cpu_count() or 52
+
+    available_cores = max(1, total_cores - reserved_cores)
+    workers_per_gpu = max(1, available_cores // max(1, num_gpus))
+
+    # Cap at 16 to prevent diminishing returns and overhead
+    return min(16, workers_per_gpu)
+
+
+def get_available_ram_gb() -> float:
+    """
+    Get available system RAM in GB.
+
+    Returns:
+        Available RAM in GB, or 0 if detection fails
+    """
+    if PSUTIL_AVAILABLE:
+        mem = psutil.virtual_memory()
+        return mem.available / (1024**3)
+    else:
+        # Fallback to /proc/meminfo on Linux
+        try:
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    if 'MemAvailable' in line:
+                        mem_kb = int(line.split()[1])
+                        return mem_kb / (1024**2)
+        except (FileNotFoundError, PermissionError):
+            pass
+        return 0.0
+
+
+def should_preload_dataset(min_ram_gb: float = 128.0) -> bool:
+    """
+    Check if dataset should be preloaded to RAM.
+
+    For 450GB RAM systems, preloading eliminates I/O bottlenecks.
+
+    Args:
+        min_ram_gb: Minimum free RAM required for preloading
+
+    Returns:
+        True if enough RAM is available for preloading
+    """
+    available = get_available_ram_gb()
+    return available >= min_ram_gb
+
+
+def print_h100_optimization_status():
+    """
+    Print comprehensive H100 optimization status.
+
+    Call at training start to verify optimal configuration.
+    """
+    print("\n" + "=" * 60)
+    print("H100 OPTIMIZATION STATUS")
+    print("=" * 60)
+
+    # GPU info
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            is_h100 = props.major >= 9 or "H100" in props.name
+            tag = " [H100]" if is_h100 else ""
+            print(f"GPU {i}: {props.name}{tag}")
+            print(f"  Memory: {props.total_memory / 1e9:.1f} GB")
+            print(f"  Compute: {props.major}.{props.minor}")
+
+    # CPU/RAM info
+    workers = get_optimal_worker_count(torch.cuda.device_count() or 1)
+    ram_gb = get_available_ram_gb()
+    print(f"\nCPU Workers per GPU: {workers}")
+    print(f"Available RAM: {ram_gb:.1f} GB")
+    print(f"Dataset preload recommended: {should_preload_dataset()}")
+
+    # Kernel status
+    print("\nKernel Status:")
+    try:
+        import flash_attn
+        print(f"  FlashAttention-2: v{flash_attn.__version__}")
+    except ImportError:
+        print("  FlashAttention-2: NOT INSTALLED")
+
+    try:
+        import mamba_ssm
+        print(f"  Mamba-SSM: v{mamba_ssm.__version__}")
+    except ImportError:
+        print("  Mamba-SSM: NOT INSTALLED (CRITICAL)")
+
+    # TF32 status
+    print(f"\nTF32 Matmul: {torch.backends.cuda.matmul.allow_tf32}")
+    print(f"TF32 cuDNN: {torch.backends.cudnn.allow_tf32}")
+
+    print("=" * 60 + "\n")
 
 
 # Quick setup function for training

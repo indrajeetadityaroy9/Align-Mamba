@@ -38,6 +38,16 @@ python -m pytest doc_nmt_mamba/tests/test_models.py -v
 python -m pytest doc_nmt_mamba/tests/test_synthetic.py -v
 python -m pytest doc_nmt_mamba/tests/test_verification_checklist.py -v
 python -m pytest doc_nmt_mamba/tests/test_data_pipeline.py -v
+
+# Run single test by name
+python -m pytest doc_nmt_mamba/tests/test_verification_checklist.py::TestSegmentAwareFlip::test_segment_aware_flip_basic -v
+```
+
+### Linting & Formatting
+```bash
+black doc_nmt_mamba/          # Format code
+isort doc_nmt_mamba/          # Sort imports
+mypy doc_nmt_mamba/           # Type checking
 ```
 
 ### Training
@@ -55,6 +65,15 @@ torchrun --nproc_per_node=2 doc_nmt_mamba/scripts/train.py
 
 # Debug mode
 python doc_nmt_mamba/scripts/train.py model=small training=debug
+
+# Hydra overrides (any config value can be overridden)
+python doc_nmt_mamba/scripts/train.py training.batch_size=32 training.learning_rate=1e-4
+python doc_nmt_mamba/scripts/train.py data=opus_books model.dropout=0.2
+
+# CLI entry points (after pip install -e .)
+nmt-train                     # Same as python doc_nmt_mamba/scripts/train.py
+nmt-evaluate                  # Run evaluation
+nmt-build-tokenizer           # Build tokenizer
 ```
 
 ### Evaluation
@@ -81,13 +100,15 @@ python doc_nmt_mamba/scripts/benchmark_hardware.py
 
 **Encoder**: BiMamba (forward+backward scan) + bidirectional attention at layers N/2 and N-1
 
-**Decoder** (24 layers):
+**Decoder** (configurable, e.g., 24 layers with `hybrid_interval=8`):
 - Layer 0: **HYBRID BLOCK** (Mamba + Cross-Attn) - Contextualized Preamble
 - Layers 1-7: Mamba only (causal)
 - Layer 8: **HYBRID BLOCK** (Mamba + Cross-Attn) - Refresh 1
 - Layers 9-15: Mamba only (causal)
 - Layer 16: **HYBRID BLOCK** (Mamba + Cross-Attn) - Refresh 2
 - Layers 17-23: Mamba only (causal)
+
+The medium model (`model=medium`) uses 16 encoder + 16 decoder layers. HYBRID blocks are placed at layer 0 and every `hybrid_interval` layers.
 
 Each HYBRID block:
 ```

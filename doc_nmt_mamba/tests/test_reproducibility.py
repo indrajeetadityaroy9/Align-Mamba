@@ -242,7 +242,7 @@ class TestAugmentationReproducibility:
 
     def test_catn_same_seed_same_output(self):
         """CAT-N with same seed should produce identical output."""
-        from data.augmentation import ConcatenationAugmenter, DocumentSample
+        from data.collator import ConcatenationAugmenter, DocumentSample
 
         doc = DocumentSample(
             src_sentences=[f"Source sentence {i}." for i in range(10)],
@@ -263,8 +263,8 @@ class TestAugmentationReproducibility:
 
     def test_dataset_epoch_reset(self):
         """Dataset set_epoch should reset augmentation."""
-        from data.document_dataset import DocumentNMTDataset
-        from data.augmentation import ConcatenationAugmenter
+        from data.dataset import DocumentNMTDataset
+        from data.collator import ConcatenationAugmenter
 
         src = ["sent1", "sent2", "sent3", "sent4", "sent5"]
         tgt = ["tgt1", "tgt2", "tgt3", "tgt4", "tgt5"]

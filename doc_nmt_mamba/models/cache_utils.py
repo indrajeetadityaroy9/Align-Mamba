@@ -32,7 +32,7 @@ from typing import Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from .encoder_decoder import ModelConfig, HybridMambaEncoderDecoder
+from .modeling_hybrid import ModelConfig, HybridMambaEncoderDecoder
 
 
 def load_checkpoint(
@@ -60,7 +60,6 @@ def load_checkpoint(
 
     checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
 
-    # Handle checkpoint format
     if isinstance(checkpoint, dict):
         # New format with model_state_dict key
         if 'model_state_dict' in checkpoint:
@@ -124,24 +123,20 @@ def load_model_from_checkpoint(
         >>> model.eval()
         >>> outputs = model.generate(src_ids)
     """
-    # Load checkpoint components
     state_dict, config, metadata = load_checkpoint(checkpoint_path, map_location='cpu')
 
-    # Print metadata if available
     if metadata:
         print(f"Checkpoint metadata:")
         print(f"  PyTorch: {metadata.get('pytorch_version', 'unknown')}")
         print(f"  CUDA: {metadata.get('cuda_version', 'unknown')}")
         print(f"  Timestamp: {metadata.get('timestamp', 'unknown')}")
 
-    # Build model with loaded config
     model = HybridMambaEncoderDecoder(
         config=config,
         device=device,
         dtype=dtype,
     )
 
-    # Load weights
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
     if missing or unexpected:
@@ -200,7 +195,6 @@ def save_checkpoint(
     if hasattr(model, 'config'):
         config = asdict(model.config)
     elif hasattr(model, 'module') and hasattr(model.module, 'config'):
-        # Handle DDP wrapped models
         config = asdict(model.module.config)
     else:
         raise ValueError(
@@ -214,9 +208,8 @@ def save_checkpoint(
     else:
         state_dict = model.state_dict()
 
-    # Build checkpoint
     checkpoint = {
-        'config': config,  # REQUIRED
+        'config': config,
         'model_state_dict': state_dict,
         'global_step': global_step,
         'epoch': epoch,
@@ -229,15 +222,12 @@ def save_checkpoint(
         }
     }
 
-    # Add optimizer state if provided
     if optimizer is not None:
         checkpoint['optimizer_state_dict'] = optimizer.state_dict()
 
-    # Add scheduler state if provided
     if scheduler is not None and hasattr(scheduler, 'state_dict'):
         checkpoint['scheduler_state_dict'] = scheduler.state_dict()
 
-    # Save
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, output_path)

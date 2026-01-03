@@ -24,8 +24,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.cuda.amp import autocast
 
-from .objectives import create_loss_fn
-from .schedulers import create_scheduler
+from .objectives import create_loss_fn, create_scheduler
 from .distributed import (
     DistributedConfig,
     setup_distributed,
@@ -41,6 +40,8 @@ from .hardware import (
     setup_h100_optimizations,
     setup_nccl_optimizations,
     CUDAMemoryManager,
+    get_optimal_worker_count,
+    print_h100_optimization_status,
 )
 
 
@@ -90,6 +91,17 @@ class TrainerConfig:
     tf32_matmul: bool = True
     cudnn_benchmark: bool = True
     channels_last: bool = True  # Use channels-last memory format
+    matmul_precision: str = "high"  # 'high' = BF16 accumulation for H100
+
+    # Fused optimizer (critical for H100 performance)
+    use_fused_optimizer: bool = True
+
+    # DataLoader optimizations for high-CPU systems
+    dataloader_num_workers: int = 16
+    dataloader_pin_memory: bool = True
+    dataloader_persistent_workers: bool = True
+    dataloader_prefetch_factor: int = 4
+    bucket_cap_mb: int = 512  # H100 NVLink optimized (larger buckets = fewer NCCL calls)
 
     # Distributed training
     distributed_strategy: str = "ddp"  # "none", "ddp", "fsdp", "fsdp_full"
@@ -234,6 +246,10 @@ class Trainer:
                 use_infiniband=False,
             )
 
+        # Print H100 optimization status (main process only)
+        if self.is_main:
+            print_h100_optimization_status()
+
     def _setup_reproducibility(self):
         """
         Set seeds for reproducibility per NeurIPS/ICML guidelines.
@@ -266,7 +282,13 @@ class Trainer:
             print(f"Set random seed: {seed}")
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
-        """Create AdamW optimizer with weight decay."""
+        """
+        Create AdamW optimizer with weight decay.
+
+        Uses fused=True for H100 optimization:
+        - Runs entire optimizer step on GPU without CPU round-trips
+        - ~5-10% training speedup on H100
+        """
         # Separate parameters for weight decay
         no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight", "norm.weight"]
         params_with_wd = []
@@ -284,11 +306,80 @@ class Trainer:
             {"params": params_without_wd, "weight_decay": 0.0},
         ]
 
+        # Use fused optimizer for H100 (requires CUDA and PyTorch 2.0+)
+        use_fused = (
+            self.config.use_fused_optimizer
+            and torch.cuda.is_available()
+            and self.device.type == "cuda"
+        )
+
+        if use_fused:
+            if self.is_main:
+                print("Using fused AdamW optimizer (H100 optimized)")
+
         return torch.optim.AdamW(
             optimizer_groups,
             lr=self.config.learning_rate,
             betas=self.config.betas,
             eps=self.config.eps,
+            fused=use_fused,  # CRITICAL: Fused kernels for H100
+        )
+
+    @classmethod
+    def create_dataloader(
+        cls,
+        dataset,
+        batch_size: int,
+        is_train: bool = True,
+        world_size: int = 1,
+        rank: int = 0,
+        collate_fn=None,
+        drop_last: bool = True,
+    ) -> DataLoader:
+        """
+        Create an optimized DataLoader for H100 training.
+
+        Uses psutil-based worker calculation for optimal CPU utilization
+        on high-CPU systems (e.g., 52 vCPUs).
+
+        Args:
+            dataset: Dataset to load from
+            batch_size: Batch size per device
+            is_train: Whether this is for training (affects shuffling)
+            world_size: Number of GPUs for distributed training
+            rank: Current process rank
+            collate_fn: Optional collation function
+            drop_last: Whether to drop last incomplete batch
+
+        Returns:
+            Optimized DataLoader
+        """
+        # Calculate optimal workers using hardware detection
+        num_workers = get_optimal_worker_count(world_size)
+
+        # Setup distributed sampler if needed
+        sampler = None
+        shuffle = is_train
+        if world_size > 1:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=shuffle,
+            )
+            shuffle = False  # Sampler handles shuffling
+
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            sampler=sampler,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=True,  # H100 optimized
+            persistent_workers=True if num_workers > 0 else False,  # Keep workers alive
+            prefetch_factor=4 if num_workers > 0 else None,  # Aggressive prefetching
+            drop_last=drop_last,
         )
 
     def train(self):

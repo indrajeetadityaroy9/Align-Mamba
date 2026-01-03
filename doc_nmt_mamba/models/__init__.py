@@ -2,9 +2,14 @@
 Document-Level NMT Models with Hybrid Mamba-Attention Architecture.
 
 This package provides:
-- Mamba-2 blocks (causal and bidirectional)
-- Attention modules (RoPE, FlashAttention-based)
-- Hybrid encoder-decoder for document-level NMT
+- Building blocks: RMSNorm, RoPE, Attention layers, Mamba blocks
+- Hybrid architecture: Encoder, Decoder, Full Model
+- Checkpoint utilities: save/load with embedded config
+
+Consolidated structure:
+- layers.py: All building blocks (RMSNorm, RoPE, Attention, Mamba)
+- modeling_hybrid.py: Architecture (Encoder, Decoder, EncoderDecoder)
+- cache_utils.py: Checkpoint save/load utilities
 
 Note: Full model functionality requires mamba-ssm (CUDA only).
 Some components (attention, segment_aware_flip) work without CUDA.
@@ -12,20 +17,21 @@ Some components (attention, segment_aware_flip) work without CUDA.
 
 import warnings
 
-# Always available: attention modules
-from .attention import (
+# Always available: building blocks from layers.py
+from .layers import (
+    RMSNorm,
     RotaryPositionalEmbedding,
-    FlashCrossAttention,
-    CausalSelfAttention,
+    segment_aware_flip,
+    sdpa_attention,
+    sdpa_cross_attention,
     BidirectionalAttention,
+    CausalSelfAttention,
+    FlashCrossAttention,
+    FLASH_ATTN_AVAILABLE,
 )
 
-# Always available: pure PyTorch utilities
-from .mamba2.norms import RMSNorm
-from .mamba2.bimamba import segment_aware_flip
-
 # Always available: checkpoint utilities
-from .checkpoint_utils import (
+from .cache_utils import (
     load_model_from_checkpoint,
     load_checkpoint,
     save_checkpoint,
@@ -35,29 +41,24 @@ from .checkpoint_utils import (
 _cuda_modules_available = False
 
 try:
-    from .encoder_decoder import (
-        ModelConfig,
-        HybridCacheParams,
-        HybridMambaEncoderDecoder,
-    )
-
-    from .mamba2 import (
+    # Mamba blocks (require mamba-ssm)
+    from .layers import (
         Mamba2BlockWrapper,
         BiMambaBlock,
     )
 
-    from .hybrid import (
+    # Architecture classes
+    from .modeling_hybrid import (
         LayerType,
-        compute_attention_positions,
-        compute_hybrid_positions,
-        build_encoder_layers,
-        build_decoder_layers,
         count_layer_types,
+        MambaState,
+        AttentionKVCache,
+        HybridCacheParams,
+        ModelConfig,
         HybridBlock,
         HybridBiMambaEncoder,
         HybridMambaDecoder,
-        MambaState,
-        AttentionKVCache,
+        HybridMambaEncoderDecoder,
     )
 
     _cuda_modules_available = True
@@ -76,59 +77,49 @@ except ImportError as e:
                 "Install with: pip install mamba-ssm"
             )
 
+    Mamba2BlockWrapper = _CUDARequired
+    BiMambaBlock = _CUDARequired
     ModelConfig = _CUDARequired
     HybridCacheParams = _CUDARequired
     HybridMambaEncoderDecoder = _CUDARequired
-    Mamba2BlockWrapper = _CUDARequired
-    BiMambaBlock = _CUDARequired
     HybridBlock = _CUDARequired
     HybridBiMambaEncoder = _CUDARequired
     HybridMambaDecoder = _CUDARequired
 
     # These are still importable for type checking
-    from .hybrid.layer_builder import LayerType
-    from .hybrid.layer_builder import (
-        compute_attention_positions,
-        compute_hybrid_positions,
+    from .modeling_hybrid import (
+        LayerType,
         count_layer_types,
+        MambaState,
+        AttentionKVCache,
     )
-    from .hybrid.decoder import MambaState, AttentionKVCache
-
-    # Dummy builder functions
-    def build_encoder_layers(*args, **kwargs):
-        raise ImportError("mamba-ssm required for build_encoder_layers")
-
-    def build_decoder_layers(*args, **kwargs):
-        raise ImportError("mamba-ssm required for build_decoder_layers")
 
 
 __all__ = [
-    # Main model
-    "ModelConfig",
-    "HybridCacheParams",
-    "HybridMambaEncoderDecoder",
-    # Mamba blocks
+    # Building blocks - always available
     "RMSNorm",
+    "RotaryPositionalEmbedding",
+    "segment_aware_flip",
+    "sdpa_attention",
+    "sdpa_cross_attention",
+    "BidirectionalAttention",
+    "CausalSelfAttention",
+    "FlashCrossAttention",
+    "FLASH_ATTN_AVAILABLE",
+    # Mamba blocks - require CUDA
     "Mamba2BlockWrapper",
     "BiMambaBlock",
-    "segment_aware_flip",
-    # Attention
-    "RotaryPositionalEmbedding",
-    "FlashCrossAttention",
-    "CausalSelfAttention",
-    "BidirectionalAttention",
-    # Hybrid architecture
+    # Architecture
     "LayerType",
-    "compute_attention_positions",
-    "compute_hybrid_positions",
-    "build_encoder_layers",
-    "build_decoder_layers",
     "count_layer_types",
+    "MambaState",
+    "AttentionKVCache",
+    "HybridCacheParams",
+    "ModelConfig",
     "HybridBlock",
     "HybridBiMambaEncoder",
     "HybridMambaDecoder",
-    "MambaState",
-    "AttentionKVCache",
+    "HybridMambaEncoderDecoder",
     # Checkpoint utilities
     "load_model_from_checkpoint",
     "load_checkpoint",

@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
 """
-Evaluation script for Document-Level NMT with Hybrid Mamba-Attention.
+Unified Evaluation Script for Document-Level NMT.
+
+This is a thin wrapper that delegates to the evaluation library.
 
 Usage:
+    # Full evaluation
     python scripts/evaluate.py checkpoint=outputs/checkpoint-10000
-    python scripts/evaluate.py checkpoint=outputs/best --eval_mode=full
-    python scripts/evaluate.py --eval_mode=length_analysis
+
+    # Specific modes
+    python scripts/evaluate.py checkpoint=outputs/best eval_mode=quality
+    python scripts/evaluate.py checkpoint=outputs/best eval_mode=contrapro
+    python scripts/evaluate.py checkpoint=outputs/best eval_mode=efficiency
+    python scripts/evaluate.py checkpoint=outputs/best eval_mode=full
+
+    # Quick evaluation (skip COMET, fewer samples)
+    python scripts/evaluate.py checkpoint=outputs/best quick=true
 
 Evaluation modes:
-- standard: BLEU, chrF, TER, COMET
+- quality: BLEU, chrF, TER, COMET
 - contrapro: Contrastive pronoun evaluation
-- entity: Named entity recall analysis
-- length: Length sensitivity analysis
+- efficiency: Throughput and memory benchmarks
 - full: All of the above
 """
 
-import os
 import sys
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -32,66 +40,27 @@ from tqdm import tqdm
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from models import ModelConfig, HybridMambaEncoderDecoder
-from data import NMTTokenizer, IWSLT14Dataset, create_collator
+from models import ModelConfig, HybridMambaEncoderDecoder, load_model_from_checkpoint
+from data import IWSLT14Dataset, create_tokenizer
 from evaluation import (
+    # Runner
+    EvaluationRunner,
+    RunnerConfig,
+    # Metrics
     EvaluationSuite,
-    evaluate_pronoun_accuracy,
-    create_synthetic_contrapro_examples,
+    # Analysis
+    ContrastivePronounEvaluator,
+    ContraProDataset,
     analyze_entity_recall,
-    analyze_length_sensitivity,
     LengthSensitivityAnalyzer,
     ExtrapolationTester,
 )
 
 
-def load_model(
-    checkpoint_path: str,
-    config: DictConfig,
-    device: str = "cuda",
-    dtype: torch.dtype = torch.bfloat16,
-) -> HybridMambaEncoderDecoder:
-    """Load model from checkpoint."""
-    model_cfg = ModelConfig(
-        vocab_size=config.model.vocab_size,
-        d_model=config.model.d_model,
-        encoder_layers=config.model.encoder_layers,
-        decoder_layers=config.model.decoder_layers,
-        d_state=config.model.d_state,
-        n_heads=config.model.n_heads,
-        attention_ratio=config.model.attention_ratio,
-        cross_attn_every=config.model.cross_attn_every,
-        dropout=0.0,  # No dropout for evaluation
-        max_seq_len=config.model.max_seq_len,
-    )
-
-    model = HybridMambaEncoderDecoder(
-        config=model_cfg,
-        device=device,
-        dtype=dtype,
-    )
-
-    # Load checkpoint
-    checkpoint = Path(checkpoint_path)
-    if checkpoint.is_dir():
-        model_file = checkpoint / "model.pt"
-    else:
-        model_file = checkpoint
-
-    state_dict = torch.load(model_file, map_location=device)
-    model.load_state_dict(state_dict)
-    model.eval()
-
-    print(f"Loaded model from {checkpoint_path}")
-    print(f"Parameters: {model.num_parameters() / 1e6:.1f}M")
-
-    return model
-
-
 @torch.no_grad()
 def generate_translations(
     model: HybridMambaEncoderDecoder,
-    tokenizer: NMTTokenizer,
+    tokenizer,
     sources: List[str],
     batch_size: int = 16,
     max_length: int = 256,
@@ -104,197 +73,44 @@ def generate_translations(
         batch_sources = sources[i : i + batch_size]
 
         # Encode sources
-        encoded = tokenizer.encode_source(batch_sources)
+        encoded = tokenizer(batch_sources, return_tensors="pt", padding=True)
         src_ids = encoded["input_ids"].to(device)
 
         # Generate
         generated = model.generate(src_ids, max_length=max_length)
 
         # Decode
-        batch_translations = tokenizer.batch_decode(generated)
+        batch_translations = tokenizer.batch_decode(generated, skip_special_tokens=True)
         translations.extend(batch_translations)
 
     return translations
 
 
-def evaluate_standard(
-    model: HybridMambaEncoderDecoder,
-    tokenizer: NMTTokenizer,
-    test_dataset,
-    batch_size: int = 16,
-    device: str = "cuda",
-) -> Dict:
-    """Run standard MT evaluation (BLEU, COMET, etc.)."""
-    print("\n" + "=" * 60)
-    print("Standard MT Evaluation")
-    print("=" * 60)
+def load_test_data(dataset_name: str, split: str = "test", **kwargs):
+    """Load test data sources and references."""
+    if dataset_name.lower() == "iwslt14":
+        # Load IWSLT14 test data
+        data_path = Path("data/iwslt14/test.de-en")
+        sources = []
+        references = []
 
-    # Extract sources and references
-    sources = []
-    references = []
-    for i in range(len(test_dataset)):
-        sample = test_dataset.samples[i]
-        sources.append(sample[0])
-        references.append(sample[1])
+        src_file = data_path.parent / f"test.de"
+        ref_file = data_path.parent / f"test.en"
 
-    # Generate translations
-    translations = generate_translations(
-        model, tokenizer, sources, batch_size, device=device
-    )
+        if src_file.exists() and ref_file.exists():
+            with open(src_file) as f:
+                sources = [line.strip() for line in f]
+            with open(ref_file) as f:
+                references = [line.strip() for line in f]
+        else:
+            print(f"Test files not found at {data_path.parent}")
+            print("Using dummy data for demonstration")
+            sources = ["Hallo Welt."] * 10
+            references = ["Hello World."] * 10
 
-    # Evaluate
-    eval_suite = EvaluationSuite(use_comet=True)
-    result = eval_suite.evaluate(sources, translations, references)
+        return sources, references
 
-    print(f"\nResults:")
-    print(f"  BLEU:  {result.bleu:.2f}")
-    print(f"  chrF:  {result.chrf:.2f}")
-    print(f"  TER:   {result.ter:.2f}")
-    print(f"  COMET: {result.comet:.4f}")
-
-    return {
-        "bleu": result.bleu,
-        "chrf": result.chrf,
-        "ter": result.ter,
-        "comet": result.comet,
-        "n_samples": len(sources),
-    }
-
-
-def evaluate_contrapro(
-    model: HybridMambaEncoderDecoder,
-    tokenizer: NMTTokenizer,
-    contrapro_path: Optional[str] = None,
-    device: str = "cuda",
-) -> Dict:
-    """Run contrastive pronoun evaluation."""
-    print("\n" + "=" * 60)
-    print("Contrastive Pronoun Evaluation (ContraPro)")
-    print("=" * 60)
-
-    # Load or create examples
-    if contrapro_path and Path(contrapro_path).exists():
-        from evaluation import ContraProDataset
-        dataset = ContraProDataset(contrapro_path)
-        examples = list(dataset)
-    else:
-        print("Using synthetic examples (real ContraPro data not found)")
-        examples = create_synthetic_contrapro_examples(100)
-
-    # Evaluate
-    result = evaluate_pronoun_accuracy(model, tokenizer, examples, device)
-
-    print(f"\nResults:")
-    print(f"  Overall Accuracy: {result.accuracy:.2%}")
-    print(f"  Correct: {result.correct}/{result.total_examples}")
-
-    if result.by_pronoun_type:
-        print("\n  By Pronoun Type:")
-        for ptype, acc in result.by_pronoun_type.items():
-            print(f"    {ptype}: {acc:.2%}")
-
-    if result.by_distance:
-        print("\n  By Antecedent Distance:")
-        for dist, acc in sorted(result.by_distance.items()):
-            print(f"    Distance {dist}: {acc:.2%}")
-
-    return {
-        "accuracy": result.accuracy,
-        "correct": result.correct,
-        "total": result.total_examples,
-        "by_pronoun_type": result.by_pronoun_type,
-        "by_distance": result.by_distance,
-    }
-
-
-def evaluate_entity_recall(
-    model: HybridMambaEncoderDecoder,
-    tokenizer: NMTTokenizer,
-    test_dataset,
-    batch_size: int = 16,
-    device: str = "cuda",
-) -> Dict:
-    """Run named entity recall analysis."""
-    print("\n" + "=" * 60)
-    print("Named Entity Recall Analysis")
-    print("=" * 60)
-
-    # Get sources and generate translations
-    sources = [test_dataset.samples[i][0] for i in range(min(500, len(test_dataset)))]
-    translations = generate_translations(
-        model, tokenizer, sources, batch_size, device=device
-    )
-
-    # Analyze
-    result = analyze_entity_recall(sources, translations)
-
-    print(f"\nResults:")
-    print(f"  Overall Recall: {result.overall_recall:.2%}")
-    print(f"  Total Source Entities: {result.total_source_entities}")
-    print(f"  Found in Translation: {result.total_found_in_translation}")
-
-    if result.by_entity_type:
-        print("\n  By Entity Type:")
-        for etype, metrics in result.by_entity_type.items():
-            print(f"    {etype}: {metrics['recall']:.2%} ({metrics['total']} total)")
-
-    if result.missing_entities:
-        print(f"\n  Most Common Missing Entities: {result.missing_entities[:10]}")
-
-    return {
-        "recall": result.overall_recall,
-        "total_entities": result.total_source_entities,
-        "found": result.total_found_in_translation,
-        "by_type": result.by_entity_type,
-    }
-
-
-def evaluate_length_sensitivity(
-    model: HybridMambaEncoderDecoder,
-    tokenizer: NMTTokenizer,
-    test_dataset=None,
-    device: str = "cuda",
-) -> Dict:
-    """Run length sensitivity analysis."""
-    print("\n" + "=" * 60)
-    print("Length Sensitivity Analysis")
-    print("=" * 60)
-
-    # Memory and speed scaling
-    print("\nMeasuring memory and speed scaling...")
-    analyzer = LengthSensitivityAnalyzer(model, tokenizer, device)
-
-    test_lengths = [128, 256, 512, 1024, 2048]
-    memory_scaling, speed_scaling = analyzer.analyze_scaling(test_lengths)
-
-    print("\nMemory Scaling:")
-    for length, memory in memory_scaling.items():
-        print(f"  {length} tokens: {memory:.2f} GB")
-
-    print("\nSpeed Scaling (tokens/sec):")
-    for length, speed in speed_scaling.items():
-        print(f"  {length} tokens: {speed:.1f}")
-
-    # Extrapolation test
-    print("\nTesting length extrapolation...")
-    extrapolation_tester = ExtrapolationTester(
-        model, tokenizer,
-        training_max_length=2048,
-        device=device,
-    )
-    extrapolation_results = extrapolation_tester.test_extrapolation()
-
-    print("\nExtrapolation Results:")
-    for length, result in extrapolation_results.items():
-        status = "OK" if result["success"] else "FAILED"
-        relative = result["relative_to_training"]
-        print(f"  {length} tokens ({relative:.1f}x training): {status}")
-
-    return {
-        "memory_scaling": memory_scaling,
-        "speed_scaling": speed_scaling,
-        "extrapolation": extrapolation_results,
-    }
+    raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
 @hydra.main(config_path="../configs", config_name="config", version_base=None)
@@ -310,86 +126,84 @@ def main(cfg: DictConfig):
         return
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if cfg.training.use_bf16 else torch.float32
+    dtype = torch.bfloat16 if cfg.training.get("use_bf16", True) else torch.float32
 
     print(f"\nDevice: {device}")
     print(f"Checkpoint: {cfg.checkpoint}")
 
-    # Create tokenizer
-    print("\nLoading tokenizer...")
-    tokenizer = NMTTokenizer(
-        src_lang=cfg.data.src_lang,
-        tgt_lang=cfg.data.tgt_lang,
+    # Determine mode
+    eval_mode = cfg.get("eval_mode", "quality")
+    quick = cfg.get("quick", False)
+
+    # Create runner config
+    runner_config = RunnerConfig(
+        output_dir=cfg.get("output_dir", "outputs/evaluation"),
+        skip_comet=cfg.get("skip_comet", False),
+        quick=quick,
     )
-    cfg.model.vocab_size = tokenizer.vocab_size
+
+    # Load tokenizer
+    print("\nLoading tokenizer...")
+    tokenizer = create_tokenizer(
+        tokenizer_type="custom",
+        tokenizer_path="data/tokenizer/tokenizer.json",
+    )
 
     # Load model
     print("\nLoading model...")
-    model = load_model(cfg.checkpoint, cfg, device, dtype)
+    try:
+        model, model_config = load_model_from_checkpoint(
+            cfg.checkpoint,
+            device=device,
+            dtype=dtype,
+        )
+        model.eval()
+        print(f"Loaded model: {model.num_parameters() / 1e6:.1f}M parameters")
+    except Exception as e:
+        print(f"Failed to load model: {e}")
+        print("Make sure checkpoint path is correct and contains model.pt or model.v2.pt")
+        return
 
-    # Load test dataset
-    print("\nLoading test dataset...")
-    test_dataset = IWSLT14Dataset(
-        split="test",
+    model_name = Path(cfg.checkpoint).stem
+
+    # Create runner
+    runner = EvaluationRunner(runner_config, device=device)
+
+    # Determine what to run
+    run_quality = eval_mode in ["quality", "full"]
+    run_efficiency = eval_mode in ["efficiency", "full"]
+    run_contrapro = eval_mode in ["contrapro", "full"]
+
+    # Load test data for quality evaluation
+    sources, hypotheses, references = None, None, None
+    if run_quality:
+        print("\nLoading test data...")
+        sources, references = load_test_data("iwslt14", "test")
+        print(f"Test samples: {len(sources)}")
+
+        # Generate translations
+        print("\nGenerating translations...")
+        hypotheses = generate_translations(
+            model, tokenizer, sources,
+            batch_size=cfg.training.get("batch_size", 16),
+            max_length=cfg.data.get("max_tgt_length", 256),
+            device=device,
+        )
+
+    # Run evaluation
+    result = runner.run_full_evaluation(
+        model=model,
         tokenizer=tokenizer,
-        max_src_length=cfg.data.max_src_length,
-        max_tgt_length=cfg.data.max_tgt_length,
+        sources=sources,
+        hypotheses=hypotheses,
+        references=references,
+        model_name=model_name,
+        run_quality=run_quality,
+        run_efficiency=run_efficiency,
+        run_contrapro=run_contrapro,
     )
-    print(f"Test samples: {len(test_dataset)}")
 
-    # Determine evaluation mode
-    eval_mode = cfg.get("eval_mode", "standard")
-    results = {}
-
-    if eval_mode in ["standard", "full"]:
-        results["standard"] = evaluate_standard(
-            model, tokenizer, test_dataset,
-            batch_size=cfg.training.batch_size,
-            device=device,
-        )
-
-    if eval_mode in ["contrapro", "full"]:
-        results["contrapro"] = evaluate_contrapro(
-            model, tokenizer,
-            contrapro_path=cfg.get("contrapro_path"),
-            device=device,
-        )
-
-    if eval_mode in ["entity", "full"]:
-        results["entity_recall"] = evaluate_entity_recall(
-            model, tokenizer, test_dataset,
-            batch_size=cfg.training.batch_size,
-            device=device,
-        )
-
-    if eval_mode in ["length", "full"]:
-        results["length_sensitivity"] = evaluate_length_sensitivity(
-            model, tokenizer, test_dataset,
-            device=device,
-        )
-
-    # Save results
-    output_dir = Path(cfg.training.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results_file = output_dir / "evaluation_results.json"
-
-    # Convert numpy/tensor values for JSON
-    def convert_for_json(obj):
-        if isinstance(obj, dict):
-            return {k: convert_for_json(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_for_json(v) for v in obj]
-        elif hasattr(obj, "item"):
-            return obj.item()
-        else:
-            return obj
-
-    with open(results_file, "w") as f:
-        json.dump(convert_for_json(results), f, indent=2)
-
-    print(f"\n" + "=" * 60)
-    print(f"Results saved to {results_file}")
-    print("=" * 60)
+    print(f"\nResults saved to: {runner_config.output_dir}")
 
 
 if __name__ == "__main__":

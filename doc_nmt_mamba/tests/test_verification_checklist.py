@@ -39,7 +39,7 @@ class TestSegmentAwareFlip:
         Expected: Result must be [A2, A1, B3, B2, B1].
         Failure Mode: If you get [B3, B2, B1, A2, A1], the encoder is broken.
         """
-        from doc_nmt_mamba.models.mamba2 import segment_aware_flip
+        from doc_nmt_mamba.models.layers import segment_aware_flip
 
         # Create packed sequence: Doc A has 2 tokens, Doc B has 3 tokens
         # Values: A1=1, A2=2, B1=3, B2=4, B3=5
@@ -74,7 +74,7 @@ class TestSegmentAwareFlip:
 
     def test_segment_aware_flip_single_document(self):
         """Test flip with single document (should work like regular flip)."""
-        from doc_nmt_mamba.models.mamba2 import segment_aware_flip
+        from doc_nmt_mamba.models.layers import segment_aware_flip
 
         x = torch.tensor([[1.0], [2.0], [3.0], [4.0]])
         cu_seqlens = torch.tensor([0, 4])
@@ -86,7 +86,7 @@ class TestSegmentAwareFlip:
 
     def test_segment_aware_flip_three_documents(self):
         """Test flip with three documents of varying lengths."""
-        from doc_nmt_mamba.models.mamba2 import segment_aware_flip
+        from doc_nmt_mamba.models.layers import segment_aware_flip
 
         # Doc A: 2 tokens, Doc B: 1 token, Doc C: 3 tokens
         x = torch.tensor([
@@ -119,7 +119,7 @@ class TestSegmentAwareFlip:
 
     def test_segment_aware_flip_no_cu_seqlens(self):
         """Test flip without cu_seqlens (standard batched flip)."""
-        from doc_nmt_mamba.models.mamba2 import segment_aware_flip
+        from doc_nmt_mamba.models.layers import segment_aware_flip
 
         # Standard batched tensor (B, L, D)
         x = torch.tensor([
@@ -152,108 +152,108 @@ class TestHybridLayerConfiguration:
 
     def test_layer_0_is_hybrid_block(self):
         """Verify Layer 0 is a HybridBlock with Mamba + CrossAttention."""
-        from doc_nmt_mamba.models.hybrid import (
-            build_decoder_layers,
+        from doc_nmt_mamba.models.modeling_hybrid import (
+            HybridMambaDecoder,
             LayerType,
             HybridBlock,
         )
 
-        layers, layer_types = build_decoder_layers(
-            n_layers=24,
+        decoder = HybridMambaDecoder(
+            vocab_size=1000,
             d_model=256,
+            n_layers=24,
             d_state=64,
             n_heads=8,
             hybrid_interval=8,
-            use_hybrid_blocks=True,
         )
 
         # Layer 0 must be HYBRID
-        assert layer_types[0] == LayerType.HYBRID, (
-            f"Layer 0 should be HYBRID, got {layer_types[0]}"
+        assert decoder.layer_types[0] == LayerType.HYBRID, (
+            f"Layer 0 should be HYBRID, got {decoder.layer_types[0]}"
         )
 
         # Layer 0 must be a HybridBlock instance
-        assert isinstance(layers[0], HybridBlock), (
-            f"Layer 0 should be HybridBlock, got {type(layers[0])}"
+        assert isinstance(decoder.layers[0], HybridBlock), (
+            f"Layer 0 should be HybridBlock, got {type(decoder.layers[0])}"
         )
 
         # HybridBlock must have both Mamba and CrossAttention
-        layer0 = layers[0]
+        layer0 = decoder.layers[0]
         assert hasattr(layer0, 'mamba'), "HybridBlock missing Mamba component"
         assert hasattr(layer0, 'cross_attn'), "HybridBlock missing CrossAttention"
 
     def test_layer_8_is_hybrid_block(self):
         """Verify Layer 8 is a HybridBlock (first refresh)."""
-        from doc_nmt_mamba.models.hybrid import build_decoder_layers, LayerType
+        from doc_nmt_mamba.models.modeling_hybrid import HybridMambaDecoder, LayerType
 
-        layers, layer_types = build_decoder_layers(
-            n_layers=24,
+        decoder = HybridMambaDecoder(
+            vocab_size=1000,
             d_model=256,
+            n_layers=24,
             d_state=64,
             n_heads=8,
             hybrid_interval=8,
-            use_hybrid_blocks=True,
         )
 
-        assert layer_types[8] == LayerType.HYBRID, (
-            f"Layer 8 should be HYBRID, got {layer_types[8]}"
+        assert decoder.layer_types[8] == LayerType.HYBRID, (
+            f"Layer 8 should be HYBRID, got {decoder.layer_types[8]}"
         )
 
     def test_layer_16_is_hybrid_block(self):
         """Verify Layer 16 is a HybridBlock (second refresh)."""
-        from doc_nmt_mamba.models.hybrid import build_decoder_layers, LayerType
+        from doc_nmt_mamba.models.modeling_hybrid import HybridMambaDecoder, LayerType
 
-        layers, layer_types = build_decoder_layers(
-            n_layers=24,
+        decoder = HybridMambaDecoder(
+            vocab_size=1000,
             d_model=256,
+            n_layers=24,
             d_state=64,
             n_heads=8,
             hybrid_interval=8,
-            use_hybrid_blocks=True,
         )
 
-        assert layer_types[16] == LayerType.HYBRID, (
-            f"Layer 16 should be HYBRID, got {layer_types[16]}"
+        assert decoder.layer_types[16] == LayerType.HYBRID, (
+            f"Layer 16 should be HYBRID, got {decoder.layer_types[16]}"
         )
 
     def test_layer_1_is_mamba_only(self):
         """Verify Layer 1 is Mamba-only (not hybrid)."""
-        from doc_nmt_mamba.models.hybrid import build_decoder_layers, LayerType
+        from doc_nmt_mamba.models.modeling_hybrid import HybridMambaDecoder, LayerType
 
-        layers, layer_types = build_decoder_layers(
-            n_layers=24,
+        decoder = HybridMambaDecoder(
+            vocab_size=1000,
             d_model=256,
+            n_layers=24,
             d_state=64,
             n_heads=8,
             hybrid_interval=8,
-            use_hybrid_blocks=True,
         )
 
-        assert layer_types[1] == LayerType.MAMBA, (
-            f"Layer 1 should be MAMBA, got {layer_types[1]}"
+        assert decoder.layer_types[1] == LayerType.MAMBA, (
+            f"Layer 1 should be MAMBA, got {decoder.layer_types[1]}"
         )
 
     def test_hybrid_layer_pattern(self):
         """Verify exact pattern: HYBRID at [0, 8, 16], MAMBA elsewhere."""
-        from doc_nmt_mamba.models.hybrid import build_decoder_layers, LayerType
+        from doc_nmt_mamba.models.modeling_hybrid import HybridMambaDecoder, LayerType
 
-        layers, layer_types = build_decoder_layers(
-            n_layers=24,
+        decoder = HybridMambaDecoder(
+            vocab_size=1000,
             d_model=256,
+            n_layers=24,
             d_state=64,
             n_heads=8,
             hybrid_interval=8,
-            use_hybrid_blocks=True,
         )
 
-        hybrid_indices = [i for i, lt in enumerate(layer_types) if lt == LayerType.HYBRID]
+        hybrid_indices = [i for i, lt in enumerate(decoder.layer_types) if lt == LayerType.HYBRID]
 
         assert hybrid_indices == [0, 8, 16], (
             f"HYBRID layers should be at [0, 8, 16], got {hybrid_indices}"
         )
 
         # All other layers should be MAMBA
-        for i, lt in enumerate(layer_types):
+        for i, lt in enumerate(decoder.layer_types):
             if i not in [0, 8, 16]:
                 assert lt == LayerType.MAMBA, (
                     f"Layer {i} should be MAMBA, got {lt}"
@@ -275,7 +275,7 @@ class TestCrossAttentionShapes:
 
     def test_hybrid_block_forward_shapes(self):
         """Verify HybridBlock handles tensor shapes correctly."""
-        from doc_nmt_mamba.models.hybrid import HybridBlock
+        from doc_nmt_mamba.models.modeling_hybrid import HybridBlock
 
         batch_size = 2
         tgt_len = 64
@@ -305,7 +305,7 @@ class TestCrossAttentionShapes:
 
     def test_encoder_decoder_batch_alignment(self):
         """Verify encoder and decoder batch sizes align."""
-        from doc_nmt_mamba.models.hybrid import HybridBlock
+        from doc_nmt_mamba.models.modeling_hybrid import HybridBlock
 
         batch_size = 4
         d_model = 256
@@ -321,7 +321,7 @@ class TestCrossAttentionShapes:
 
     def test_cross_attention_projection_dimensions(self):
         """Verify Q, K, V projections have correct dimensions."""
-        from doc_nmt_mamba.models.attention import FlashCrossAttention
+        from doc_nmt_mamba.models.layers import FlashCrossAttention
 
         d_model = 256
         n_heads = 8
@@ -351,7 +351,7 @@ class TestMQARLeakage:
 
     def test_query_after_kv_pairs(self):
         """Verify Query tokens appear strictly after Key-Value pairs."""
-        from doc_nmt_mamba.data.synthetic import MQARDataset, MQARConfig
+        from doc_nmt_mamba.data.dataset import MQARDataset, MQARConfig
 
         config = MQARConfig(
             vocab_size=8192,
@@ -391,7 +391,7 @@ class TestMQARLeakage:
 
     def test_target_values_only_in_kv_section(self):
         """Verify target values appear in context only with their keys."""
-        from doc_nmt_mamba.data.synthetic import MQARDataset, MQARConfig
+        from doc_nmt_mamba.data.dataset import MQARDataset, MQARConfig
 
         config = MQARConfig(
             vocab_size=8192,
@@ -433,7 +433,7 @@ class TestMQARLeakage:
 
     def test_kv_structure_consistency(self):
         """Verify KV structure follows k:v pattern."""
-        from doc_nmt_mamba.data.synthetic import MQARDataset, MQARConfig
+        from doc_nmt_mamba.data.dataset import MQARDataset, MQARConfig
 
         config = MQARConfig(
             vocab_size=8192,
@@ -484,7 +484,7 @@ class TestMQARBottleneckConfig:
 
     def test_default_d_state_is_64(self):
         """Verify default d_state is 64 (reduced to force bottleneck)."""
-        from doc_nmt_mamba.data.synthetic import MQARConfig
+        from doc_nmt_mamba.data.dataset import MQARConfig
 
         config = MQARConfig()
         assert config.d_state == 64, (
@@ -493,7 +493,7 @@ class TestMQARBottleneckConfig:
 
     def test_num_pairs_can_exceed_d_state(self):
         """Verify we can create datasets with num_pairs > d_state."""
-        from doc_nmt_mamba.data.synthetic import MQARDataset, MQARConfig
+        from doc_nmt_mamba.data.dataset import MQARDataset, MQARConfig
 
         # This should exceed state capacity
         config = MQARConfig(
@@ -510,7 +510,7 @@ class TestMQARBottleneckConfig:
 
     def test_curriculum_spans_cliff(self):
         """Verify curriculum includes stages that span the cliff point."""
-        from doc_nmt_mamba.data.synthetic import MQARCurriculumGenerator
+        from doc_nmt_mamba.data.dataset import MQARCurriculumGenerator
 
         generator = MQARCurriculumGenerator(
             d_state=64,
@@ -536,7 +536,7 @@ class TestSubwordToWordMapping:
 
     def test_build_token_to_word_map_basic(self):
         """Test basic token-to-word mapping."""
-        from doc_nmt_mamba.evaluation.alignment import SubwordToWordMapper
+        from doc_nmt_mamba.evaluation.analysis import SubwordToWordMapper
 
         mapper = SubwordToWordMapper(word_boundary_prefix="▁")
 
@@ -561,7 +561,7 @@ class TestSubwordToWordMapping:
 
     def test_subword_aggregation_max_pooling(self):
         """Test attention aggregation uses max-pooling correctly."""
-        from doc_nmt_mamba.evaluation.alignment import SubwordToWordMapper
+        from doc_nmt_mamba.evaluation.analysis import SubwordToWordMapper
 
         mapper = SubwordToWordMapper()
 
@@ -588,7 +588,7 @@ class TestSubwordToWordMapping:
 
     def test_punctuation_handling(self):
         """Test that punctuation gets proper word indices."""
-        from doc_nmt_mamba.evaluation.alignment import SubwordToWordMapper
+        from doc_nmt_mamba.evaluation.analysis import SubwordToWordMapper
 
         mapper = SubwordToWordMapper(word_boundary_prefix="▁")
 
@@ -623,7 +623,7 @@ class TestCATNConcatenation:
 
     def test_separator_in_concatenated_output(self):
         """Verify concatenated samples contain separator."""
-        from doc_nmt_mamba.data.augmentation import ConcatenationAugmenter, DocumentSample
+        from doc_nmt_mamba.data.collator import ConcatenationAugmenter, DocumentSample
 
         # Use a clear separator
         augmenter = ConcatenationAugmenter(
@@ -654,7 +654,7 @@ class TestCATNConcatenation:
 
     def test_concatenation_preserves_alignment(self):
         """Verify source and target remain aligned after concatenation."""
-        from doc_nmt_mamba.data.augmentation import ConcatenationAugmenter, DocumentSample
+        from doc_nmt_mamba.data.collator import ConcatenationAugmenter, DocumentSample
 
         augmenter = ConcatenationAugmenter(
             n_sentences=5,
@@ -797,7 +797,7 @@ class TestSmokeTests:
 
     def test_mqar_generation(self):
         """Verify MQAR dataset can be created and sampled."""
-        from doc_nmt_mamba.data.synthetic import MQARDataset, MQARConfig
+        from doc_nmt_mamba.data.dataset import MQARDataset, MQARConfig
 
         config = MQARConfig(num_pairs=16)
         dataset = MQARDataset(config, num_samples=10)
@@ -819,6 +819,8 @@ class TestSmokeTests:
         from doc_nmt_mamba.evaluation import (
             BLEUScorer,
             CHRFScorer,
+        )
+        from doc_nmt_mamba.evaluation.analysis import (
             ContrastivePronounEvaluator,
             EntityRecallAnalyzer,
             AlignmentEvaluator,

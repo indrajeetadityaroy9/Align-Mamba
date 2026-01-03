@@ -1,6 +1,12 @@
 """
 Training infrastructure for Document-Level NMT.
 
+Consolidated structure:
+- objectives.py: Loss functions + LR schedulers
+- trainer.py: Training loop, evaluation, checkpoints
+- distributed.py: DDP/FSDP setup, barrier sync
+- hardware.py: H100 optimizations, TF32, memory tracking
+
 Provides:
 - LabelSmoothingCrossEntropy for NMT training
 - CosineAnnealingWarmupScheduler for LR scheduling
@@ -10,12 +16,12 @@ Provides:
 """
 
 from .objectives import (
+    # Loss functions
     LabelSmoothingCrossEntropy,
     SequenceLoss,
     PackedSequenceLoss,
     create_loss_fn,
-)
-from .schedulers import (
+    # Schedulers
     CosineAnnealingWarmupScheduler,
     InverseSqrtScheduler,
     LinearWarmupDecayScheduler,
@@ -41,10 +47,15 @@ from .hardware import (
     CUDAMemoryManager,
     is_ampere_or_newer,
     is_hopper,
+    # H100-specific utilities
+    get_optimal_worker_count,
+    get_available_ram_gb,
+    should_preload_dataset,
+    print_h100_optimization_status,
 )
 
 __all__ = [
-    # Objectives
+    # Loss functions
     "LabelSmoothingCrossEntropy",
     "SequenceLoss",
     "PackedSequenceLoss",
@@ -75,4 +86,9 @@ __all__ = [
     "CUDAMemoryManager",
     "is_ampere_or_newer",
     "is_hopper",
+    # H100-specific utilities
+    "get_optimal_worker_count",
+    "get_available_ram_gb",
+    "should_preload_dataset",
+    "print_h100_optimization_status",
 ]
