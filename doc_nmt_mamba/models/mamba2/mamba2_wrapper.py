@@ -8,8 +8,21 @@ The official CUDA kernels are 10-50x faster.
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
+import warnings
 
-from mamba_ssm import Mamba2
+# Lazy import for mamba_ssm (CUDA-only)
+_mamba2_available = False
+Mamba2 = None
+
+try:
+    from mamba_ssm import Mamba2 as _Mamba2
+    Mamba2 = _Mamba2
+    _mamba2_available = True
+except ImportError:
+    warnings.warn(
+        "mamba-ssm not available. Mamba2BlockWrapper will not work. "
+        "Install with: pip install mamba-ssm (requires CUDA)"
+    )
 
 from .norms import RMSNorm
 
@@ -48,6 +61,12 @@ class Mamba2BlockWrapper(nn.Module):
             dtype: Data type for parameters
         """
         super().__init__()
+
+        if not _mamba2_available:
+            raise ImportError(
+                "mamba-ssm is required for Mamba2BlockWrapper. "
+                "Install with: pip install mamba-ssm (requires CUDA on Linux)"
+            )
 
         self.d_model = d_model
         self.d_state = d_state

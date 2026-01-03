@@ -18,18 +18,26 @@ from .hybrid import HybridBiMambaEncoder, HybridMambaDecoder, MambaState, Attent
 
 @dataclass
 class ModelConfig:
-    """Configuration for the Hybrid Mamba-Attention model."""
+    """Configuration for the Hybrid Mamba-Attention model.
+
+    NEW ARCHITECTURE (from plan):
+    - Decoder uses HYBRID blocks at [0, 8, 16] for 24-layer model
+    - Each HYBRID block contains Mamba + Cross-Attention
+    - Ratio: 3/24 = 1:8 = 12.5%
+    """
 
     vocab_size: int = 32000
     d_model: int = 768
     encoder_layers: int = 16
-    decoder_layers: int = 16
+    decoder_layers: int = 24  # Changed to 24 for [0,8,16] pattern
     d_state: int = 128
     d_conv: int = 4
     expand: int = 2
     n_heads: int = 12
-    attention_ratio: float = 0.125  # 1:7 ratio
-    cross_attn_every: int = 4
+    attention_ratio: float = 0.125  # 1:7 ratio for encoder
+    cross_attn_every: int = 4  # Deprecated - use hybrid_interval
+    hybrid_interval: int = 8  # NEW: interval between HYBRID blocks
+    use_hybrid_blocks: bool = True  # NEW: use HYBRID block architecture
     dropout: float = 0.1
     max_seq_len: int = 8192
     pad_token_id: int = 0
@@ -80,11 +88,13 @@ class HybridMambaEncoderDecoder(nn.Module):
         vocab_size: int = 32000,
         d_model: int = 768,
         encoder_layers: int = 16,
-        decoder_layers: int = 16,
+        decoder_layers: int = 24,
         d_state: int = 128,
         n_heads: int = 12,
         attention_ratio: float = 0.125,
         cross_attn_every: int = 4,
+        hybrid_interval: int = 8,
+        use_hybrid_blocks: bool = True,
         dropout: float = 0.1,
         max_seq_len: int = 8192,
         pad_token_id: int = 0,
@@ -100,11 +110,13 @@ class HybridMambaEncoderDecoder(nn.Module):
             vocab_size: Size of vocabulary
             d_model: Model dimension
             encoder_layers: Number of encoder layers
-            decoder_layers: Number of decoder layers
+            decoder_layers: Number of decoder layers (24 for [0,8,16] pattern)
             d_state: Mamba state dimension
             n_heads: Number of attention heads
             attention_ratio: Fraction of attention layers (1/8 = 1:7 ratio)
-            cross_attn_every: Add cross-attention every N decoder layers
+            cross_attn_every: Deprecated - use hybrid_interval
+            hybrid_interval: Interval between HYBRID blocks (default 8)
+            use_hybrid_blocks: Whether to use HYBRID block architecture
             dropout: Dropout rate
             max_seq_len: Maximum sequence length
             pad_token_id: Padding token ID
@@ -126,6 +138,8 @@ class HybridMambaEncoderDecoder(nn.Module):
             n_heads = config.n_heads
             attention_ratio = config.attention_ratio
             cross_attn_every = config.cross_attn_every
+            hybrid_interval = config.hybrid_interval
+            use_hybrid_blocks = config.use_hybrid_blocks
             dropout = config.dropout
             max_seq_len = config.max_seq_len
             pad_token_id = config.pad_token_id
@@ -142,6 +156,8 @@ class HybridMambaEncoderDecoder(nn.Module):
             n_heads=n_heads,
             attention_ratio=attention_ratio,
             cross_attn_every=cross_attn_every,
+            hybrid_interval=hybrid_interval,
+            use_hybrid_blocks=use_hybrid_blocks,
             dropout=dropout,
             max_seq_len=max_seq_len,
             pad_token_id=pad_token_id,
@@ -165,7 +181,7 @@ class HybridMambaEncoderDecoder(nn.Module):
             **factory_kwargs,
         )
 
-        # Decoder
+        # Decoder with HYBRID blocks
         self.decoder = HybridMambaDecoder(
             vocab_size=vocab_size,
             d_model=d_model,
@@ -174,6 +190,8 @@ class HybridMambaEncoderDecoder(nn.Module):
             n_heads=n_heads,
             attention_ratio=attention_ratio,
             cross_attn_every=cross_attn_every,
+            hybrid_interval=hybrid_interval,
+            use_hybrid_blocks=use_hybrid_blocks,
             dropout=dropout,
             max_seq_len=max_seq_len,
             pad_token_id=pad_token_id,

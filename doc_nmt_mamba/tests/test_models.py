@@ -8,6 +8,15 @@ import pytest
 import torch
 import torch.nn as nn
 
+# Check if mamba-ssm is available
+try:
+    import mamba_ssm
+    HAS_MAMBA = True
+except ImportError:
+    HAS_MAMBA = False
+
+requires_mamba = pytest.mark.skipif(not HAS_MAMBA, reason="mamba-ssm required (CUDA only)")
+
 # Set device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
@@ -205,6 +214,7 @@ class TestLayerBuilder:
         assert 8 in positions  # middle
         assert 15 in positions  # final
 
+    @requires_mamba
     def test_build_encoder_layers(self):
         from models.hybrid import build_encoder_layers, LayerType
 
@@ -221,6 +231,7 @@ class TestLayerBuilder:
         assert LayerType.BIMAMBA in layer_types
         assert LayerType.ATTENTION in layer_types
 
+    @requires_mamba
     def test_build_decoder_layers(self):
         from models.hybrid import build_decoder_layers, LayerType
 

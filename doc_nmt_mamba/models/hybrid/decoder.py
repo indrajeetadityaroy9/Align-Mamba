@@ -1,10 +1,20 @@
 """
 Hybrid Mamba Decoder.
 
-Combines:
-- Causal Mamba blocks for O(1) per-step complexity
-- Sparse causal self-attention for in-context learning (1:7 ratio)
-- Cross-attention to encoder every N layers
+NEW ARCHITECTURE (from plan):
+- Layer 0: HYBRID (Mamba + Cross-Attn) - Contextualized Preamble
+- Layers 1-7: Mamba only
+- Layer 8: HYBRID - Refresh 1
+- Layers 9-15: Mamba only
+- Layer 16: HYBRID - Refresh 2
+- Layers 17-23: Mamba only
+
+Each HYBRID layer:
+    x = x + Mamba(RMSNorm(x))           # Position-aware queries
+    x = x + CrossAttn(RMSNorm(x), enc)  # Source-aligned output
+
+Total HYBRID Layers: 3 (at indices [0, 8, 16])
+Ratio: 3/24 = 1:8 = 12.5%
 """
 
 import math
@@ -34,26 +44,31 @@ class AttentionKVCache:
 
 class HybridMambaDecoder(nn.Module):
     """
-    Hybrid decoder with causal Mamba + sparse self-attention + cross-attention.
+    Hybrid decoder with HYBRID blocks at strategic positions.
+
+    NEW ARCHITECTURE:
+    - HYBRID blocks at [0, 8, 16] contain both Mamba + Cross-Attention
+    - Pure Mamba blocks at remaining positions
 
     Complexity per generation step:
-    - Mamba self-attention: O(1)
-    - Causal attention: O(L_tgt) via KV cache
-    - Cross-attention: O(L_src)
+    - Mamba: O(1) via state caching
+    - Cross-attention: O(L_src) at HYBRID layers only
 
-    Total: O(L_src + L_tgt) which is still faster than Transformer's O(L_src + L_tgt^2)
-    for long sequences.
+    Total: O(L_src) at 3 layers, O(1) at 21 layers
+    Much faster than Transformer's O(L_src + L_tgt) at every layer.
     """
 
     def __init__(
         self,
         vocab_size: int,
         d_model: int = 768,
-        n_layers: int = 16,
+        n_layers: int = 24,
         d_state: int = 128,
         n_heads: int = 12,
         attention_ratio: float = 0.125,
         cross_attn_every: int = 4,
+        hybrid_interval: int = 8,
+        use_hybrid_blocks: bool = True,
         dropout: float = 0.1,
         max_seq_len: int = 8192,
         pad_token_id: int = 0,
@@ -64,11 +79,13 @@ class HybridMambaDecoder(nn.Module):
         Args:
             vocab_size: Size of vocabulary
             d_model: Model dimension
-            n_layers: Number of decoder layers
+            n_layers: Number of decoder layers (default 24 for [0,8,16] pattern)
             d_state: Mamba state dimension
             n_heads: Number of attention heads
-            attention_ratio: Fraction of self-attention layers
-            cross_attn_every: Add cross-attention every N layers
+            attention_ratio: Fraction of self-attention layers (deprecated)
+            cross_attn_every: Deprecated - use hybrid_interval instead
+            hybrid_interval: Interval between HYBRID blocks (default 8)
+            use_hybrid_blocks: If True, use new HYBRID architecture
             dropout: Dropout rate
             max_seq_len: Maximum sequence length
             pad_token_id: Padding token ID
@@ -83,7 +100,8 @@ class HybridMambaDecoder(nn.Module):
         self.n_layers = n_layers
         self.n_heads = n_heads
         self.pad_token_id = pad_token_id
-        self.cross_attn_every = cross_attn_every
+        self.hybrid_interval = hybrid_interval
+        self.use_hybrid_blocks = use_hybrid_blocks
         self.dtype = dtype  # Store for embedding output conversion
 
         # For state management during inference
@@ -105,6 +123,8 @@ class HybridMambaDecoder(nn.Module):
             n_heads=n_heads,
             attention_ratio=attention_ratio,
             cross_attn_every=cross_attn_every,
+            hybrid_interval=hybrid_interval,
+            use_hybrid_blocks=use_hybrid_blocks,
             dropout=dropout,
             max_seq_len=max_seq_len,
             **factory_kwargs,
@@ -153,7 +173,12 @@ class HybridMambaDecoder(nn.Module):
         # Apply hybrid layers
         for layer, layer_type in zip(self.layers, self.layer_types):
             if self._gradient_checkpointing and self.training:
-                if layer_type == LayerType.CROSS_ATTENTION:
+                if layer_type == LayerType.HYBRID:
+                    # HYBRID: Mamba + Cross-Attention in same block
+                    x = torch.utils.checkpoint.checkpoint(
+                        layer, x, encoder_out, use_reentrant=False
+                    )
+                elif layer_type == LayerType.CROSS_ATTENTION:
                     x = torch.utils.checkpoint.checkpoint(
                         layer, x, encoder_out, use_reentrant=False
                     )
@@ -166,7 +191,10 @@ class HybridMambaDecoder(nn.Module):
                         layer, x, use_reentrant=False
                     )
             else:
-                if layer_type == LayerType.CROSS_ATTENTION:
+                if layer_type == LayerType.HYBRID:
+                    # HYBRID: Mamba + Cross-Attention in same block
+                    x = layer(x, encoder_out)
+                elif layer_type == LayerType.CROSS_ATTENTION:
                     x = layer(x, encoder_out)
                 elif layer_type == LayerType.ATTENTION:
                     x, _ = layer(x)  # Ignore KV cache during training
@@ -191,6 +219,7 @@ class HybridMambaDecoder(nn.Module):
 
         CRITICAL: This must be structured correctly from Day 1!
         Mamba layers have fixed-size state, attention has growing KV cache.
+        HYBRID layers need Mamba state (cross-attention uses cached encoder).
 
         Args:
             batch_size: Batch size
@@ -218,6 +247,15 @@ class HybridMambaDecoder(nn.Module):
                 conv_state, ssm_state = layer.mamba.allocate_inference_cache(
                     batch_size=batch_size,
                     max_seqlen=1,  # For step-by-step generation
+                    dtype=dtype,
+                    device=device,
+                )
+                ssm_states[layer_idx] = MambaState(conv_state, ssm_state)
+            elif layer_type == LayerType.HYBRID:
+                # HYBRID: need Mamba state (cross-attention uses encoder_output)
+                conv_state, ssm_state = layer.mamba.mamba.allocate_inference_cache(
+                    batch_size=batch_size,
+                    max_seqlen=1,
                     dtype=dtype,
                     device=device,
                 )
@@ -267,6 +305,16 @@ class HybridMambaDecoder(nn.Module):
                     x = layer(x, inference_params=(state.conv_state, state.ssm_state))
                 else:
                     x = layer(x)
+            elif layer_type == LayerType.HYBRID:
+                # HYBRID: Mamba with state + Cross-attention with cached encoder
+                state = cache["ssm_states"].get(layer_idx)
+                inference_params = (state.conv_state, state.ssm_state) if state else None
+                x = layer(
+                    x,
+                    cache["encoder_output"],
+                    decoder_offset=offset,
+                    inference_params=inference_params,
+                )
             elif layer_type == LayerType.ATTENTION:
                 # Self-attention: update KV cache
                 kv_cache = cache["kv_caches"][layer_idx]

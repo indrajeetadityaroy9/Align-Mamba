@@ -1,0 +1,172 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc-nmt-mamba"
+version = "0.1.0"
+description = "Document-Level Neural Machine Translation with Hybrid Mamba-Attention Architecture"
+readme = "research_implementation_plan.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Indrajeet Aditya Roy"}
+]
+keywords = ["nmt", "machine-translation", "mamba", "transformer", "deep-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # Core ML framework
+    "torch>=2.2.0",
+
+    # Configuration management
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+
+    # Data processing
+    "numpy>=1.24.0",
+    "tokenizers>=0.15.0",
+    "transformers>=4.36.0",
+    "datasets>=2.14.0",
+
+    # Evaluation metrics
+    "sacrebleu>=2.3.0",
+
+    # Utilities
+    "tqdm>=4.65.0",
+    "pandas>=2.0.0",
+]
+
+[project.optional-dependencies]
+# CUDA dependencies (Linux only, requires CUDA 12.3+)
+cuda = [
+    "mamba-ssm>=2.0.0",
+    "causal-conv1d>=1.2.0",
+]
+
+# FlashAttention-2 for memory-efficient attention (recommended for H100)
+flash = [
+    "flash-attn>=2.5.0",
+]
+
+# COMET neural evaluation metric
+comet = [
+    "unbabel-comet>=2.2.0",
+]
+
+# spaCy for entity recall analysis
+nlp = [
+    "spacy>=3.7.0",
+]
+
+# Visualization tools
+viz = [
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+]
+
+# Development dependencies
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.5.0",
+]
+
+# All optional dependencies (for GPU environments)
+all = [
+    "mamba-ssm>=2.0.0",
+    "causal-conv1d>=1.2.0",
+    "flash-attn>=2.5.0",
+    "unbabel-comet>=2.2.0",
+    "spacy>=3.7.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.5.0",
+]
+
+# CPU-only installation (for development/testing without GPU)
+cpu = [
+    "unbabel-comet>=2.2.0",
+    "spacy>=3.7.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/indrajeetadityaroy/NMT_English_to_Vietnamese"
+
+[project.scripts]
+nmt-train = "doc_nmt_mamba.scripts.train:main"
+nmt-evaluate = "doc_nmt_mamba.scripts.evaluate:main"
+nmt-build-tokenizer = "doc_nmt_mamba.scripts.build_tokenizer:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["doc_nmt_mamba*"]
+
+[tool.setuptools.package-data]
+"doc_nmt_mamba" = ["configs/**/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["doc_nmt_mamba/tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.venv
+    | venv
+    | build
+    | dist
+    | outputs
+    | data
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip = [".git", ".venv", "venv", "build", "dist", "outputs", "data"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = [
+    "venv",
+    ".venv",
+    "build",
+    "dist",
+    "outputs",
+]

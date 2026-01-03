@@ -1,3 +1,115 @@
-doc_nmt_mamba/outputs/
+# Virtual Environment
+venv/
+.venv/
+env/
+.env/
+ENV/
+.python-version
+
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Training outputs and checkpoints
+outputs/
 doc_nmt_mamba/outputs/
 *.pt
+*.pth
+*.ckpt
+checkpoints/
+
+# Data files and directories
+data/
+datasets/
+*.json
+*.jsonl
+*.csv
+*.tsv
+*.txt
+*.parquet
+*.arrow
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.bin
+*.safetensors
+*.msgpack
+
+# Tokenizer files (can be regenerated)
+*.model
+tokenizer.json
+tokenizer_*.json
+
+# Experiment results (large files)
+experiments/
+*.log
+
+# HuggingFace cache
+.cache/
+~/.cache/huggingface/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking
+.mypy_cache/
+
+# Distribution
+*.manifest
+*.spec
+
+# Resources (large PDF files)
+resources/
+
+# Hydra outputs
+multirun/
+
+# Weights & Biases
+wandb/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
