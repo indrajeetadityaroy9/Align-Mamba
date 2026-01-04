@@ -1,0 +1,26 @@
+# @package _global_
+# Main Results: Transformer Baseline on IWSLT14 De-En
+# Paper Reference: Table 1, Row 1
+#
+# This is the pure Transformer baseline for comparison with Hybrid Mamba.
+# Uses attention_ratio=1.0 (all attention layers, no Mamba blocks).
+
+defaults:
+  - /experiment/_base
+  - override /model: baseline_transformer
+  - override /data: iwslt14_de_en
+  - override /training: default
+
+experiment:
+  name: main_iwslt_baseline
+  paper_ref: "Table 1, Row 1"
+  description: "Transformer baseline on IWSLT14 De-En"
+
+project:
+  name: align_mamba_icml
+  seed: 42
+
+logging:
+  wandb:
+    enabled: true
+    tags: ["main_results", "table1", "baseline", "transformer", "iwslt14"]

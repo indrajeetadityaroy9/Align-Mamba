@@ -1,10 +1,16 @@
 # Main configuration file
 # Uses Hydra's defaults system for composability
+#
+# Usage:
+#   python train.py                           # Use defaults
+#   python train.py experiment=main_iwslt_hybrid  # Use experiment config
+#   python train.py model=hybrid_small training.batch_size=32  # Override
 
 defaults:
   - model: hybrid_medium
   - training: default
   - data: iwslt14_de_en
+  - optional experiment: null  # Optional experiment config (e.g., experiment=main_iwslt_hybrid)
   - _self_
 
 # Project settings

@@ -32,7 +32,7 @@ from typing import Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from .modeling_hybrid import ModelConfig, HybridMambaEncoderDecoder
+from .encoder_decoder import ModelConfig, HybridMambaEncoderDecoder
 
 
 def load_checkpoint(

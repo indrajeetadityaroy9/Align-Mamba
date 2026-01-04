@@ -39,14 +39,14 @@ doc_nmt_mamba/outputs/
 *.ckpt
 checkpoints/
 
-# Data files and directories
-data/
+# Data files and directories (but NOT the doc_nmt_mamba/data/ source code!)
+/data/
 datasets/
-*.json
+
+# Large data file formats (but keep requirements.txt and config yamls)
 *.jsonl
 *.csv
 *.tsv
-*.txt
 *.parquet
 *.arrow
 *.h5
@@ -57,10 +57,9 @@ datasets/
 *.safetensors
 *.msgpack
 
-# Tokenizer files (can be regenerated)
+# Tokenizer files (but keep the project's tokenizer configs)
 *.model
-tokenizer.json
-tokenizer_*.json
+# Note: tokenizer.json files in doc_nmt_mamba/data/tokenizer/ are tracked via git add -f
 
 # Experiment results (large files)
 experiments/

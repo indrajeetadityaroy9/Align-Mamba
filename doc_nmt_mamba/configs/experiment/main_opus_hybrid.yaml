@@ -1,0 +1,26 @@
+# @package _global_
+# Main Results: Align-Mamba Hybrid on OPUS Books De-En
+# Paper Reference: Table 1, Row 4
+#
+# PRIMARY EXPERIMENT: Hybrid Mamba-Attention on document-level dataset.
+# Tests O(L) scaling on long documents with CAT-N augmentation.
+
+defaults:
+  - /experiment/_base
+  - override /model: hybrid_medium
+  - override /data: opus_books
+  - override /training: default
+
+experiment:
+  name: main_opus_hybrid
+  paper_ref: "Table 1, Row 4"
+  description: "Align-Mamba hybrid model on OPUS Books De-En"
+
+project:
+  name: align_mamba_icml
+  seed: 42
+
+logging:
+  wandb:
+    enabled: true
+    tags: ["main_results", "table1", "hybrid", "mamba", "opus_books"]

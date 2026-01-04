@@ -6,10 +6,16 @@ This package provides:
 - Hybrid architecture: Encoder, Decoder, Full Model
 - Checkpoint utilities: save/load with embedded config
 
-Consolidated structure:
-- layers.py: All building blocks (RMSNorm, RoPE, Attention, Mamba)
-- modeling_hybrid.py: Architecture (Encoder, Decoder, EncoderDecoder)
-- cache_utils.py: Checkpoint save/load utilities
+Modular structure (for reviewer readability):
+- components/: Generic building blocks (normalization, embeddings, attention)
+- mamba/: Mamba-2 SSM blocks (wrapper, bimamba)
+- align_mamba.py: NOVEL contributions (HybridBlock, Encoder, Decoder)
+- encoder_decoder.py: ModelConfig, full EncoderDecoder wrapper
+- checkpoints.py: Checkpoint save/load utilities
+
+Backward compatibility:
+- layers.py: Proxy file re-exporting from components/ and mamba/
+- modeling_hybrid.py: Proxy file re-exporting from align_mamba and encoder_decoder
 
 Note: Full model functionality requires mamba-ssm (CUDA only).
 Some components (attention, segment_aware_flip) work without CUDA.
@@ -17,7 +23,7 @@ Some components (attention, segment_aware_flip) work without CUDA.
 
 import warnings
 
-# Always available: building blocks from layers.py
+# Always available: building blocks from layers.py (proxy file)
 from .layers import (
     RMSNorm,
     RotaryPositionalEmbedding,
@@ -30,8 +36,8 @@ from .layers import (
     FLASH_ATTN_AVAILABLE,
 )
 
-# Always available: checkpoint utilities
-from .cache_utils import (
+# Always available: checkpoint utilities (renamed from cache_utils.py)
+from .checkpoints import (
     load_model_from_checkpoint,
     load_checkpoint,
     save_checkpoint,
@@ -47,7 +53,7 @@ try:
         BiMambaBlock,
     )
 
-    # Architecture classes
+    # Architecture classes (from proxy file)
     from .modeling_hybrid import (
         LayerType,
         count_layer_types,
@@ -87,7 +93,7 @@ except ImportError as e:
     HybridMambaDecoder = _CUDARequired
 
     # These are still importable for type checking
-    from .modeling_hybrid import (
+    from .align_mamba import (
         LayerType,
         count_layer_types,
         MambaState,

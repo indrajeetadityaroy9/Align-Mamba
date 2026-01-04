@@ -8,23 +8,42 @@ Document-Level Neural Machine Translation using Hybrid Mamba-2/Attention archite
 
 ## Environment Setup
 
+### H100 Production Environment (ICML/NeurIPS Reproducibility)
+
+**IMPORTANT:** For H100 hardware, use the install script instead of pip install.
+This ensures correct installation order: PyTorch → CUDA kernels (with --no-build-isolation) → dependencies.
+
 ```bash
-# Activate virtual environment (always do this first)
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate
+
+# Run the H100 installation script (handles everything)
+chmod +x install_env.sh
+./install_env.sh
+```
+
+The script:
+1. Installs PyTorch 2.3.0 + CUDA 12.1 (H100 native)
+2. Compiles Mamba-SSM, causal-conv1d, FlashAttention-2 with --no-build-isolation
+3. Installs all dependencies from requirements.txt
+4. Downloads SpaCy models for Entity Recall evaluation
+
+### CPU Development Environment
+
+```bash
+# Activate virtual environment
 source venv/bin/activate
 
 # Install base dependencies (CPU-compatible)
 pip install -e ".[dev]"
 
-# On H100/CUDA machine, also install GPU packages:
-pip install -e ".[cuda]"  # mamba-ssm, causal-conv1d
-pip install -e ".[flash]" # flash-attn
-
-# All optional dependencies
-pip install -e ".[all]"
+# Optional: Install CPU-compatible extras
+pip install -e ".[cpu]"  # comet, spacy, viz, etc.
 ```
 
 Virtual environment: `venv/` (Python 3.10.11)
-Requires CUDA 12.3+ for Mamba-2 kernels. FlashAttention-2 has PyTorch SDPA fallback.
+Requires CUDA 12.1+ for Mamba-2 kernels. FlashAttention-2 has PyTorch SDPA fallback.
 
 ## Commands
 
@@ -100,15 +119,13 @@ python doc_nmt_mamba/scripts/benchmark_hardware.py
 
 **Encoder**: BiMamba (forward+backward scan) + bidirectional attention at layers N/2 and N-1
 
-**Decoder** (configurable, e.g., 24 layers with `hybrid_interval=8`):
+**Decoder** (medium model: 16 layers with `hybrid_interval=8`):
 - Layer 0: **HYBRID BLOCK** (Mamba + Cross-Attn) - Contextualized Preamble
 - Layers 1-7: Mamba only (causal)
-- Layer 8: **HYBRID BLOCK** (Mamba + Cross-Attn) - Refresh 1
+- Layer 8: **HYBRID BLOCK** (Mamba + Cross-Attn) - Refresh
 - Layers 9-15: Mamba only (causal)
-- Layer 16: **HYBRID BLOCK** (Mamba + Cross-Attn) - Refresh 2
-- Layers 17-23: Mamba only (causal)
 
-The medium model (`model=medium`) uses 16 encoder + 16 decoder layers. HYBRID blocks are placed at layer 0 and every `hybrid_interval` layers.
+HYBRID blocks placed at layer 0 and every `hybrid_interval` layers (indices [0, 8] for 16 layers).
 
 Each HYBRID block:
 ```
@@ -120,46 +137,41 @@ x = x + CrossAttn(RMSNorm(x), enc)  # Source-aligned output
 ```
 doc_nmt_mamba/
 ├── models/
-│   ├── mamba2/           # Mamba-2 SSM blocks (conditional CUDA imports)
-│   │   ├── norms.py      # RMSNorm (always available)
-│   │   ├── bimamba.py    # BiMambaBlock, segment_aware_flip
-│   │   └── mamba2_wrapper.py  # Mamba2BlockWrapper
-│   ├── attention/        # FlashAttention-2 with SDPA fallback
-│   │   ├── rope.py       # Rotary Position Embedding
-│   │   ├── flash_cross_attention.py
-│   │   ├── causal_self_attention.py
-│   │   └── bidirectional_attention.py
-│   ├── hybrid/           # Layer placement logic
-│   │   ├── layer_builder.py  # build_encoder_layers, build_decoder_layers
-│   │   ├── encoder.py    # HybridBiMambaEncoder
-│   │   └── decoder.py    # HybridMambaDecoder
-│   └── encoder_decoder.py  # HybridMambaEncoderDecoder, ModelConfig
+│   ├── layers.py           # All layer components:
+│   │                       #   RMSNorm, Mamba2BlockWrapper, BiMambaBlock,
+│   │                       #   segment_aware_flip, FlashCrossAttention,
+│   │                       #   CausalSelfAttention, BidirectionalAttention, RoPE
+│   ├── modeling_hybrid.py  # Full architecture:
+│   │                       #   HybridBlock, HybridBiMambaEncoder, HybridMambaDecoder,
+│   │                       #   HybridMambaEncoderDecoder, ModelConfig
+│   └── cache_utils.py      # MambaState, AttentionKVCache for inference
 ├── data/
-│   ├── synthetic.py      # MQARDataset for state capacity testing
-│   ├── augmentation.py   # ConcatenationAugmenter (CAT-N)
-│   ├── collation.py      # PackedSequenceCollator
-│   ├── tokenization.py   # NMTTokenizer (32K BPE)
+│   ├── synthetic.py        # MQARDataset for state capacity testing
+│   ├── augmentation.py     # ConcatenationAugmenter (CAT-N)
+│   ├── collation.py        # PackedSequenceCollator
+│   ├── tokenization.py     # NMTTokenizer (32K BPE)
 │   └── document_dataset.py
 ├── evaluation/
-│   ├── metrics.py        # BLEUScorer, CHRFScorer, COMETScorer
-│   ├── alignment.py      # SubwordToWordMapper, AlignmentEvaluator
-│   ├── contrapro.py      # Contrastive pronoun evaluation
-│   └── entity_recall.py  # Entity consistency analysis
+│   ├── metrics.py          # BLEUScorer, CHRFScorer, COMETScorer
+│   ├── alignment.py        # SubwordToWordMapper, AlignmentEvaluator
+│   ├── contrapro.py        # Contrastive pronoun evaluation
+│   └── entity_recall.py    # Entity consistency analysis
 ├── training/
-│   ├── trainer.py        # Trainer, TrainerConfig
-│   ├── hardware.py       # H100 optimization, GPU detection
-│   ├── distributed.py    # DDP/FSDP setup
-│   └── schedulers.py     # Learning rate schedulers
+│   ├── trainer.py          # Trainer, TrainerConfig
+│   ├── hardware.py         # H100 optimization, GPU detection
+│   ├── distributed.py      # DDP/FSDP setup
+│   └── schedulers.py       # Learning rate schedulers
 ├── tests/
 │   ├── test_verification_checklist.py  # Critical mechanism tests
 │   ├── test_models.py
 │   ├── test_synthetic.py
+│   ├── test_reproducibility.py
 │   └── test_data_pipeline.py
-└── configs/              # Hydra configuration
-    ├── config.yaml       # Main entry point
-    ├── model/            # small/base/medium/large
-    ├── training/         # default/debug/fast
-    └── data/             # dataset configs
+└── configs/                # Hydra configuration
+    ├── config.yaml         # Main entry point
+    ├── model/              # small/base/medium/large + baseline_transformer
+    ├── training/           # default/debug
+    └── data/               # iwslt14_de_en/opus_books/debug
 ```
 
 ## Critical Technical Decisions
@@ -189,7 +201,7 @@ python -m pytest doc_nmt_mamba/tests/test_verification_checklist.py -v
 
 Tests verify:
 - segment_aware_flip respects document boundaries
-- HYBRID blocks at [0, 8, 16]
+- HYBRID blocks at correct positions ([0, 8] for 16-layer decoder)
 - MQAR dataset has no leakage
 - SubwordToWordMapper for AER
 - CAT-N concatenation with separators

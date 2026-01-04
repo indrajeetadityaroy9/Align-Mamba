@@ -1,0 +1,26 @@
+# @package _global_
+# Main Results: Align-Mamba Hybrid on IWSLT14 De-En
+# Paper Reference: Table 1, Row 3
+#
+# PRIMARY EXPERIMENT: Hybrid Mamba-Attention architecture.
+# Uses 1:8 ratio with HYBRID blocks at layers [0, 8, 16].
+
+defaults:
+  - /experiment/_base
+  - override /model: hybrid_medium
+  - override /data: iwslt14_de_en
+  - override /training: default
+
+experiment:
+  name: main_iwslt_hybrid
+  paper_ref: "Table 1, Row 3"
+  description: "Align-Mamba hybrid model on IWSLT14 De-En"
+
+project:
+  name: align_mamba_icml
+  seed: 42
+
+logging:
+  wandb:
+    enabled: true
+    tags: ["main_results", "table1", "hybrid", "mamba", "iwslt14"]

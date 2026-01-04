@@ -1,0 +1,33 @@
+# @package _global_
+# Ablation: No Cross-Attention (Pure Mamba Decoder)
+# Paper Reference: Table 2
+#
+# Decoder with NO HYBRID blocks - pure Mamba throughout.
+# Tests whether cross-attention is necessary for translation quality.
+# Expected: Poor translation quality (no explicit source alignment).
+#
+# HYBRID positions: [] (empty - no cross-attention)
+
+defaults:
+  - /experiment/_base
+  - override /model: hybrid_medium
+  - override /data: iwslt14_de_en
+  - override /training: default
+
+experiment:
+  name: ablation_no_cross_attn
+  paper_ref: "Table 2 - Pure Mamba"
+  description: "Ablation: No HYBRID blocks (pure Mamba decoder)"
+
+project:
+  name: align_mamba_icml
+  seed: 42
+
+# Override model to have no cross-attention (empty hybrid positions)
+model:
+  custom_hybrid_positions: []
+
+logging:
+  wandb:
+    enabled: true
+    tags: ["ablation", "table2", "pure_mamba", "no_cross_attn"]

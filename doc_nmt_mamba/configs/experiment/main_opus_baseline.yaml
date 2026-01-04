@@ -1,0 +1,26 @@
+# @package _global_
+# Main Results: Transformer Baseline on OPUS Books De-En
+# Paper Reference: Table 1, Row 2
+#
+# Transformer baseline on document-level dataset with CAT-N augmentation.
+# Tests length generalization without Mamba's O(L) complexity.
+
+defaults:
+  - /experiment/_base
+  - override /model: baseline_transformer
+  - override /data: opus_books
+  - override /training: default
+
+experiment:
+  name: main_opus_baseline
+  paper_ref: "Table 1, Row 2"
+  description: "Transformer baseline on OPUS Books De-En"
+
+project:
+  name: align_mamba_icml
+  seed: 42
+
+logging:
+  wandb:
+    enabled: true
+    tags: ["main_results", "table1", "baseline", "transformer", "opus_books"]

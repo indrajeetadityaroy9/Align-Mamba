@@ -1,0 +1,37 @@
+# Base experiment configuration template
+# All experiment configs inherit from this
+#
+# Usage: Override in experiment-specific config:
+#   defaults:
+#     - /experiment/_base
+#     - override /model: hybrid_medium
+#     - override /data: iwslt14_de_en
+
+# Common experiment metadata
+experiment:
+  name: null  # REQUIRED: Override in child config
+  paper_ref: null  # e.g., "Table 1, Row 3"
+  description: null  # Brief description for logging
+
+# Project settings (inherited by all experiments)
+project:
+  name: align_mamba_icml
+  seed: 42
+  output_dir: outputs/${experiment.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+# Logging configuration
+logging:
+  level: INFO
+  wandb:
+    enabled: true
+    project: align-mamba-icml
+    entity: null
+    name: ${experiment.name}
+    tags: []  # Override per experiment
+    notes: ${experiment.description}
+
+# Reproducibility settings
+reproducibility:
+  seed: ${project.seed}
+  deterministic: false  # True slows down training 10-20%
+  cudnn_benchmark: true

@@ -1,0 +1,52 @@
+# @package _global_
+# ContraPro Evaluation
+# Paper Reference: Table 3 / Figure 4
+#
+# ContraPro: Contrastive pronoun evaluation for discourse-level NMT.
+# Tests model's ability to correctly resolve pronouns across sentence boundaries.
+# Uses contrastive pairs where only context disambiguates the correct pronoun.
+#
+# Evaluation-only config (no training).
+
+defaults:
+  - /experiment/_base
+  - override /model: hybrid_medium
+  - override /data: iwslt14_de_en
+  - override /training: default
+
+experiment:
+  name: contrapro_eval
+  paper_ref: "Table 3 / Figure 4"
+  description: "ContraPro contrastive pronoun evaluation"
+
+project:
+  name: align_mamba_icml
+  seed: 42
+
+# Evaluation configuration
+evaluation:
+  mode: contrapro  # Special evaluation mode
+  checkpoint: null  # Override at runtime: --evaluation.checkpoint=path/to/model.pt
+
+  # ContraPro-specific settings
+  contrapro:
+    dataset_path: data/contrapro/  # ContraPro test set
+    categories:
+      - "pronoun_it"  # Pronoun "it" disambiguation
+      - "pronoun_they"  # Pronoun "they" disambiguation
+      - "pronoun_you"  # Formal/informal "you"
+
+    # Scoring method
+    score_method: likelihood  # "likelihood" or "perplexity"
+
+    # Context window for disambiguation
+    context_sentences: 3  # Number of preceding sentences to include
+
+# No training needed for evaluation
+training:
+  max_steps: 0
+
+logging:
+  wandb:
+    enabled: true
+    tags: ["evaluation", "contrapro", "pronoun", "table3", "figure4"]

@@ -1,0 +1,26 @@
+# @package _global_
+# Scaling Experiment: Small Model (25M params)
+# Paper Reference: Figure 3
+#
+# Tests scaling behavior of Align-Mamba architecture.
+# 6 encoder + 6 decoder layers, d_model=384
+
+defaults:
+  - /experiment/_base
+  - override /model: hybrid_small
+  - override /data: iwslt14_de_en
+  - override /training: default
+
+experiment:
+  name: scaling_small
+  paper_ref: "Figure 3 - 25M"
+  description: "Scaling experiment: 25M parameter model"
+
+project:
+  name: align_mamba_icml
+  seed: 42
+
+logging:
+  wandb:
+    enabled: true
+    tags: ["scaling", "figure3", "small", "25M"]
