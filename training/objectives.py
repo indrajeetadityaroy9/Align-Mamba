@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LRScheduler
 
-from align_mamba.kernels import fused_cross_entropy_loss
+from kernels.loss import fused_cross_entropy_loss
 
 
 class LabelSmoothingCrossEntropy(nn.Module):
@@ -91,20 +91,3 @@ class CosineAnnealingWarmupScheduler(LRScheduler):
             scale = 0.5 * (1 + math.cos(math.pi * min(1.0, progress)))
 
         return [self.min_lr + (base_lr - self.min_lr) * scale for base_lr in self.base_lrs]
-
-
-def create_loss_fn(smoothing: float = 0.1, ignore_index: int = -100) -> nn.Module:
-    """Create label smoothing cross entropy loss."""
-    return LabelSmoothingCrossEntropy(smoothing=smoothing, ignore_index=ignore_index)
-
-
-def create_scheduler(
-    optimizer: torch.optim.Optimizer,
-    warmup_steps: int = 4000,
-    max_steps: int = 100000,
-    min_lr: float = 1e-6,
-) -> LRScheduler:
-    """Create cosine annealing scheduler with warmup."""
-    return CosineAnnealingWarmupScheduler(
-        optimizer, warmup_steps=warmup_steps, max_steps=max_steps, min_lr=min_lr
-    )

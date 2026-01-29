@@ -2,8 +2,8 @@
 """Evaluation script for State Capacity experiments.
 
 USAGE:
-    python -m align_mamba.evaluate checkpoint=outputs/01_mqar_cliff/model.pt
-    python -m align_mamba.evaluate checkpoint=<path> data.num_pairs=128
+    python evaluate.py checkpoint=outputs/01_mqar_cliff/model.pt
+    python evaluate.py checkpoint=<path> data.num_pairs=128
 """
 
 import json
@@ -14,8 +14,8 @@ import torch
 import hydra
 from omegaconf import DictConfig
 
-from align_mamba.models import load_model_from_checkpoint
-from align_mamba.data import MQARDataset, MQARConfig
+from models.checkpoints import load_model_from_checkpoint
+from data.mqar import MQARDataset, MQARConfig
 
 
 def evaluate_mqar(

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Training script for Hybrid Mamba-Attention State Capacity experiments."""
 
-import os
 import random
 
 import numpy as np
@@ -11,20 +10,11 @@ from torch.utils.data import DataLoader, DistributedSampler
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from align_mamba.models import ModelConfig, HybridMambaEncoderDecoder
-from align_mamba.data import MQARDataset, MQARConfig, MQARCollator
-from align_mamba.training import NMTTrainer, NMTTrainerConfig, setup_distributed
-from align_mamba.constants import PAD_TOKEN_ID, MQAR_VOCAB_SIZE
-
-
-def setup_environment():
-    """Configure H100 optimizations: TF32, cudnn, NCCL for NVLink."""
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    os.environ.setdefault("NCCL_IB_DISABLE", "0")
-    os.environ.setdefault("NCCL_P2P_LEVEL", "NVL")
+from models.encoder_decoder import ModelConfig, HybridMambaEncoderDecoder
+from data.mqar import MQARDataset, MQARConfig
+from data.collator import MQARCollator
+from training.trainer import NMTTrainer, setup_distributed, logger
+from constants import PAD_TOKEN_ID, MQAR_VOCAB_SIZE
 
 
 def create_model(cfg: DictConfig, device: str, dtype: torch.dtype) -> HybridMambaEncoderDecoder:
@@ -45,10 +35,10 @@ def create_model(cfg: DictConfig, device: str, dtype: torch.dtype) -> HybridMamb
 
     model = HybridMambaEncoderDecoder(config=model_cfg, device=device, dtype=dtype)
 
-    print(f"Created model with {model.num_parameters() / 1e6:.1f}M parameters")
-    print(f"Encoder: {model.encoder.get_layer_counts()}")
-    print(f"Decoder: {model.decoder.get_layer_counts()}")
-    print(f"Decoder hybrid_positions: {sorted(list(model.decoder.hybrid_positions))}")
+    logger.info(f"Model: {model.num_parameters() / 1e6:.1f}M params")
+    logger.info(f"Encoder: {model.encoder.get_layer_counts()}")
+    logger.info(f"Decoder: {model.decoder.get_layer_counts()}")
+    logger.info(f"Hybrid positions: {sorted(list(model.decoder.hybrid_positions))}")
 
     return model
 
@@ -60,7 +50,7 @@ def worker_init_fn(worker_id: int):
     random.seed(worker_seed)
 
 
-def create_dataloaders(cfg: DictConfig, dist_info: dict):
+def create_dataloaders(cfg: DictConfig, world_size: int, rank: int):
     """Create train/val dataloaders with distributed sampling if multi-GPU."""
     mqar_config = MQARConfig(
         num_pairs=cfg.data.get("num_pairs", 64),
@@ -74,11 +64,7 @@ def create_dataloaders(cfg: DictConfig, dist_info: dict):
     val_dataset = MQARDataset(config=mqar_config, num_samples=num_samples // 10, split="validation", mode=mqar_mode)
     collator = MQARCollator(pad_token_id=PAD_TOKEN_ID, mode=mqar_mode)
 
-    if dist_info.get("is_main", True):
-        print(f"MQAR Dataset: num_pairs={mqar_config.num_pairs}, mode={mqar_mode}")
-
-    world_size = dist_info.get("world_size", 1)
-    rank = dist_info.get("rank", 0)
+    logger.info(f"MQAR: num_pairs={mqar_config.num_pairs}, mode={mqar_mode}")
 
     if world_size > 1:
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
@@ -90,15 +76,13 @@ def create_dataloaders(cfg: DictConfig, dist_info: dict):
         shuffle_train = True
 
     num_workers = cfg.data.get("num_workers", 8)
-    pin_memory = num_workers > 0
-    persistent_workers = num_workers > 0
 
     loader_kwargs = {
         "batch_size": cfg.training.batch_size,
         "num_workers": num_workers,
         "collate_fn": collator,
-        "pin_memory": pin_memory,
-        "persistent_workers": persistent_workers,
+        "pin_memory": num_workers > 0,
+        "persistent_workers": num_workers > 0,
         "drop_last": False,
         "worker_init_fn": worker_init_fn if num_workers > 0 else None,
     }
@@ -106,10 +90,7 @@ def create_dataloaders(cfg: DictConfig, dist_info: dict):
     train_loader = DataLoader(train_dataset, sampler=train_sampler, shuffle=shuffle_train if train_sampler is None else False, **loader_kwargs)
     val_loader = DataLoader(val_dataset, sampler=val_sampler, shuffle=False, **loader_kwargs)
 
-    if dist_info.get("is_main", True):
-        print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
-        if world_size > 1:
-            print(f"Distributed: {world_size} GPUs, {len(train_dataset) // world_size} samples/GPU")
+    logger.info(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
     return train_loader, val_loader
 
@@ -117,54 +98,41 @@ def create_dataloaders(cfg: DictConfig, dist_info: dict):
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     """Entry point: setup, model creation, training loop."""
-    setup_environment()
     dist_info = setup_distributed()
-    is_main = dist_info.get("is_main", True)
 
-    if is_main:
-        print("=" * 60)
-        print("Align-Mamba: State Capacity Experiments")
-        print("=" * 60)
-        print(OmegaConf.to_yaml(cfg))
+    logger.info("=" * 60)
+    logger.info("Align-Mamba: State Capacity Experiments")
+    logger.info("=" * 60)
+    logger.info(OmegaConf.to_yaml(cfg))
 
     device = dist_info["device"]
     dtype = torch.bfloat16
 
-    if is_main:
-        print(f"\nDevice: {torch.cuda.get_device_name(device.index if device.index else 0)}")
-        print(f"Dtype: {dtype}, World Size: {dist_info['world_size']}")
-        print("\nMQAR synthetic task - using internal vocabulary")
+    if torch.cuda.is_available():
+        logger.info(f"Device: {torch.cuda.get_device_name(device.index or 0)}")
+    logger.info(f"Dtype: {dtype}, World Size: {dist_info['world_size']}")
 
-    if is_main:
-        print("\nCreating model...")
     model = create_model(cfg, str(device), dtype)
+    train_loader, val_loader = create_dataloaders(cfg, dist_info["world_size"], dist_info["rank"])
 
-    if is_main:
-        print("\nCreating dataloaders...")
-    train_loader, val_loader = create_dataloaders(cfg, dist_info)
-
-    trainer_config = NMTTrainerConfig(
+    trainer = NMTTrainer(
+        model=model,
+        train_dataloader=train_loader,
         seed=cfg.project.get("seed", 42),
         max_steps=cfg.training.max_steps,
         batch_size=cfg.training.batch_size,
         learning_rate=cfg.training.learning_rate,
         label_smoothing=cfg.training.get("label_smoothing"),
         output_dir=cfg.training.output_dir,
+        eval_dataloader=val_loader,
     )
-
-    if is_main:
-        print("\nInitializing trainer...")
-    trainer = NMTTrainer(model=model, train_dataloader=train_loader, config=trainer_config, eval_dataloader=val_loader)
 
     if cfg.training.get("resume_from"):
         trainer.load_checkpoint(cfg.training.resume_from)
 
-    if is_main:
-        print("\nStarting training...")
+    logger.info("Starting training...")
     trainer.train()
-
-    if is_main:
-        print("\nTraining complete!")
+    logger.info("Training complete!")
 
 
 if __name__ == "__main__":

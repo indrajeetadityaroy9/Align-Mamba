@@ -48,48 +48,21 @@ class HybridMambaEncoderDecoder(nn.Module):
 
     def __init__(
         self,
-        config: Optional[ModelConfig] = None,
-        vocab_size: int = MQAR_VOCAB_SIZE,
-        d_model: int = 256,
-        encoder_layers: int = 2,
-        decoder_layers: int = 4,
-        d_state: int = 64,
-        n_heads: int = 8,
-        hybrid_positions: Optional[List[int]] = None,
+        config: ModelConfig,
         share_embeddings: bool = True,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
-
-        if config is not None:
-            vocab_size = config.vocab_size
-            d_model = config.d_model
-            encoder_layers = config.encoder_layers
-            decoder_layers = config.decoder_layers
-            d_state = config.d_state
-            n_heads = config.n_heads
-            hybrid_positions = config.hybrid_positions
-
-        # Store config for checkpoint serialization
-        self.config = ModelConfig(
-            vocab_size=vocab_size,
-            d_model=d_model,
-            encoder_layers=encoder_layers,
-            decoder_layers=decoder_layers,
-            d_state=d_state,
-            n_heads=n_heads,
-            hybrid_positions=hybrid_positions,
-        )
-
+        self.config = config
         factory_kwargs = {"device": device, "dtype": dtype}
 
         self.encoder = HybridBiMambaEncoder(
-            vocab_size=vocab_size,
-            d_model=d_model,
-            n_layers=encoder_layers,
-            d_state=d_state,
-            n_heads=n_heads,
+            vocab_size=config.vocab_size,
+            d_model=config.d_model,
+            n_layers=config.encoder_layers,
+            d_state=config.d_state,
+            n_heads=config.n_heads,
             dropout=DROPOUT,
             max_seq_len=MAX_SEQ_LEN,
             pad_token_id=PAD_TOKEN_ID,
@@ -97,12 +70,12 @@ class HybridMambaEncoderDecoder(nn.Module):
         )
 
         self.decoder = HybridMambaDecoder(
-            vocab_size=vocab_size,
-            d_model=d_model,
-            n_layers=decoder_layers,
-            d_state=d_state,
-            n_heads=n_heads,
-            hybrid_positions=hybrid_positions,
+            vocab_size=config.vocab_size,
+            d_model=config.d_model,
+            n_layers=config.decoder_layers,
+            d_state=config.d_state,
+            n_heads=config.n_heads,
+            hybrid_positions=config.hybrid_positions,
             dropout=DROPOUT,
             max_seq_len=MAX_SEQ_LEN,
             pad_token_id=PAD_TOKEN_ID,

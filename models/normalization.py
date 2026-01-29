@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from align_mamba.kernels import fused_rmsnorm
+from kernels.rmsnorm import fused_rmsnorm
 
 
 class RMSNorm(nn.Module):

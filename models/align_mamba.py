@@ -7,7 +7,7 @@ query before cross-attention, ensuring correct initial alignment.
 
 import math
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict, Union, Set
 
 import torch
@@ -20,10 +20,8 @@ from .bimamba import BiMambaBlock
 
 
 class LayerType(Enum):
-    MAMBA = "mamba"
     BIMAMBA = "bimamba"
     ATTENTION = "attention"
-    HYBRID = "hybrid"
 
 
 def count_layer_types(layer_types: List[LayerType]) -> dict:
@@ -62,118 +60,6 @@ def compute_hybrid_positions(n_layers: int, num_hybrid: int = 3) -> Set[int]:
 class MambaInferenceState:
     conv_state: torch.Tensor  # (batch, d_inner, d_conv)
     ssm_state: torch.Tensor   # (batch, d_inner, d_state)
-
-
-@dataclass
-class DecoderInferenceCache:
-    """Cross-attention uses cached encoder_output directly (no KV cache needed)."""
-    ssm_states: Dict[int, MambaInferenceState] = field(default_factory=dict)
-    encoder_output: Optional[torch.Tensor] = None
-    seqlen_offset: int = 0
-
-
-class CurriculumDropout(nn.Module):
-    """
-    Dropout that anneals from 0 to target over warmup period.
-
-    Rationale: Early in training, the model needs to see clean gradients to learn
-    basic patterns. Dropout is introduced gradually to improve regularization
-    without hindering initial learning.
-    """
-
-    def __init__(self, target_p: float = 0.1, warmup_steps: int = 10000):
-        super().__init__()
-        self.target_p = target_p
-        self.warmup_steps = warmup_steps
-        self.register_buffer("current_step", torch.tensor(0, dtype=torch.long))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self.training:
-            return x
-        progress = min(1.0, self.current_step.item() / max(1, self.warmup_steps))
-        current_p = self.target_p * progress
-        return nn.functional.dropout(x, p=current_p, training=True)
-
-    def step(self):
-        """Call once per training step to update the dropout schedule."""
-        self.current_step.add_(1)
-
-    def reset(self):
-        """Reset the step counter (e.g., for new training run)."""
-        self.current_step.zero_()
-
-    def extra_repr(self) -> str:
-        return f"target_p={self.target_p}, warmup_steps={self.warmup_steps}"
-
-
-class HybridBlock(nn.Module):
-    """
-    Mamba + Cross-Attention block. Mamba runs first to create contextualized query,
-    then cross-attention aligns to source. At layer 0, this fixes "Blind Start".
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        d_state: int = 128,
-        n_heads: int = 8,
-        dropout: float = 0.0,
-        max_seq_len: int = 8192,
-        layer_idx: int = 0,
-        device=None,
-        dtype=None,
-    ):
-        super().__init__()
-        self.layer_idx = layer_idx
-
-        self.mamba = Mamba2BlockWrapper(
-            d_model=d_model,
-            d_state=d_state,
-            layer_idx=layer_idx,
-            device=device,
-            dtype=dtype,
-        )
-
-        self.cross_attention = FlashCrossAttention(
-            d_model=d_model,
-            n_heads=n_heads,
-            dropout=dropout,
-            max_seq_len=max_seq_len,
-            device=device,
-            dtype=dtype,
-        )
-
-    def forward(
-        self,
-        x,
-        encoder_out: Optional[torch.Tensor] = None,
-        encoder_padding_mask: Optional[torch.Tensor] = None,
-        decoder_offset: int = 0,
-        inference_params=None,
-        cu_seqlens_q=None,
-        cu_seqlens_k=None,
-        max_seqlen_q=None,
-        max_seqlen_k=None,
-    ):
-        if inference_params is not None:
-            x = self.mamba(x, inference_params=inference_params)
-        else:
-            x = self.mamba(x)
-
-        # Skip cross-attention in decoder-only mode (e.g., MQAR)
-        if encoder_out is not None:
-            x = self.cross_attention(
-                x,
-                encoder_out,
-                encoder_padding_mask=encoder_padding_mask,
-                decoder_offset=decoder_offset,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-            )
-
-        return x
 
 
 class HybridBiMambaEncoder(nn.Module):
@@ -315,8 +201,8 @@ class HybridBiMambaEncoder(nn.Module):
 
 class HybridMambaDecoder(nn.Module):
     """
-    Decoder with HYBRID blocks at adaptive positions. Layer 0 HYBRID fixes "Blind Start",
-    additional hybrid layers provide periodic source refresh. Mamba layers between are O(1) cached.
+    Decoder with cross-attention at adaptive positions. Layer 0 cross-attention fixes "Blind Start",
+    additional cross-attention layers provide periodic source refresh. All layers use Mamba for O(1) cached decoding.
 
     Default positions computed via scale-invariant formula: [0, N//3, 2N//3] for N layers.
     """
@@ -349,7 +235,6 @@ class HybridMambaDecoder(nn.Module):
         self.d_conv = 4
 
         self.embed = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_id, device=device)
-        # Learned embedding scale (initialized to sqrt(d_model))
         self.embed_scale = nn.Parameter(torch.tensor(math.sqrt(d_model)))
         self.embed_dropout = nn.Dropout(dropout)
 
@@ -359,33 +244,22 @@ class HybridMambaDecoder(nn.Module):
         else:
             self.hybrid_positions = compute_hybrid_positions(n_layers)
 
-        self.layers = nn.ModuleList()
-        self.layer_types = []
-
         factory_kwargs = {"device": device, "dtype": dtype}
 
-        for i in range(n_layers):
-            if i in self.hybrid_positions:
-                layer = HybridBlock(
-                    d_model=d_model,
-                    d_state=d_state,
-                    n_heads=n_heads,
-                    dropout=dropout,
-                    max_seq_len=max_seq_len,
-                    layer_idx=i,
-                    **factory_kwargs,
-                )
-                self.layers.append(layer)
-                self.layer_types.append(LayerType.HYBRID)
-            else:
-                layer = Mamba2BlockWrapper(
-                    d_model=d_model,
-                    d_state=d_state,
-                    layer_idx=i,
-                    **factory_kwargs,
-                )
-                self.layers.append(layer)
-                self.layer_types.append(LayerType.MAMBA)
+        # All layers are Mamba blocks
+        self.layers = nn.ModuleList([
+            Mamba2BlockWrapper(d_model=d_model, d_state=d_state, layer_idx=i, **factory_kwargs)
+            for i in range(n_layers)
+        ])
+
+        # Cross-attention only at hybrid positions
+        self.cross_attn = nn.ModuleDict({
+            str(i): FlashCrossAttention(
+                d_model=d_model, n_heads=n_heads, dropout=dropout,
+                max_seq_len=max_seq_len, **factory_kwargs
+            )
+            for i in self.hybrid_positions
+        })
 
         self.final_norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False, device=device, dtype=dtype)
@@ -409,26 +283,24 @@ class HybridMambaDecoder(nn.Module):
             x = x.to(self.dtype)
         x = self.embed_dropout(x)
 
-        for layer, layer_type in zip(self.layers, self.layer_types):
+        for i, layer in enumerate(self.layers):
             if self._gradient_checkpointing and self.training:
-                if layer_type == LayerType.HYBRID:
-                    x = torch.utils.checkpoint.checkpoint(
-                        layer, x, encoder_out, encoder_padding_mask, use_reentrant=False
-                    )
-                else:
-                    x = torch.utils.checkpoint.checkpoint(
-                        layer, x, use_reentrant=False
-                    )
+                x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
             else:
-                if layer_type == LayerType.HYBRID:
-                    x = layer(x, encoder_out, encoder_padding_mask)
+                x = layer(x)
+
+            # Cross-attention at hybrid positions (Mamba first creates contextualized query)
+            if str(i) in self.cross_attn and encoder_out is not None:
+                if self._gradient_checkpointing and self.training:
+                    x = torch.utils.checkpoint.checkpoint(
+                        self.cross_attn[str(i)], x, encoder_out, encoder_padding_mask,
+                        use_reentrant=False
+                    )
                 else:
-                    x = layer(x)
+                    x = self.cross_attn[str(i)](x, encoder_out, encoder_padding_mask=encoder_padding_mask)
 
         x = self.final_norm(x)
-        logits = self.lm_head(x)
-
-        return logits
+        return self.lm_head(x)
 
     def init_cache(
         self,
@@ -441,28 +313,13 @@ class HybridMambaDecoder(nn.Module):
         dtype = dtype or torch.bfloat16
 
         ssm_states = {}
+        for i, layer in enumerate(self.layers):
+            conv_state, ssm_state = layer.allocate_inference_cache(
+                batch_size=batch_size, dtype=dtype, device=device
+            )
+            ssm_states[i] = MambaInferenceState(conv_state, ssm_state)
 
-        for layer_idx, (layer, layer_type) in enumerate(zip(self.layers, self.layer_types)):
-            if layer_type == LayerType.MAMBA:
-                conv_state, ssm_state = layer.allocate_inference_cache(
-                    batch_size=batch_size,
-                    dtype=dtype,
-                    device=device,
-                )
-                ssm_states[layer_idx] = MambaInferenceState(conv_state, ssm_state)
-            elif layer_type == LayerType.HYBRID:
-                conv_state, ssm_state = layer.mamba.allocate_inference_cache(
-                    batch_size=batch_size,
-                    dtype=dtype,
-                    device=device,
-                )
-                ssm_states[layer_idx] = MambaInferenceState(conv_state, ssm_state)
-
-        return {
-            "ssm_states": ssm_states,
-            "encoder_output": encoder_out,
-            "seqlen_offset": 0,
-        }
+        return {"ssm_states": ssm_states, "encoder_output": encoder_out, "seqlen_offset": 0}
 
     def step(
         self,
@@ -475,36 +332,28 @@ class HybridMambaDecoder(nn.Module):
 
         offset = cache["seqlen_offset"]
 
-        for layer_idx, (layer, layer_type) in enumerate(zip(self.layers, self.layer_types)):
-            if layer_type == LayerType.MAMBA:
-                state = cache["ssm_states"].get(layer_idx)
-                if state is not None:
-                    x = layer(x, inference_params=(state.conv_state, state.ssm_state))
-                else:
-                    x = layer(x)
-            elif layer_type == LayerType.HYBRID:
-                state = cache["ssm_states"].get(layer_idx)
-                inference_params = (state.conv_state, state.ssm_state) if state else None
-                x = layer(
-                    x,
-                    cache["encoder_output"],
-                    decoder_offset=offset,
-                    inference_params=inference_params,
+        for i, layer in enumerate(self.layers):
+            state = cache["ssm_states"].get(i)
+            if state is not None:
+                x = layer(x, inference_params=(state.conv_state, state.ssm_state))
+            else:
+                x = layer(x)
+
+            if str(i) in self.cross_attn and cache["encoder_output"] is not None:
+                x = self.cross_attn[str(i)](
+                    x, cache["encoder_output"], decoder_offset=offset
                 )
 
         cache["seqlen_offset"] = offset + 1
-
         x = self.final_norm(x)
-        logits = self.lm_head(x)
-
-        return logits, cache
+        return self.lm_head(x), cache
 
     def get_layer_counts(self) -> dict:
-        return count_layer_types(self.layer_types)
+        return {"mamba": self.n_layers, "cross_attn": len(self.cross_attn)}
 
     def extra_repr(self) -> str:
         counts = self.get_layer_counts()
         return (
             f"d_model={self.d_model}, n_layers={self.n_layers}, "
-            f"mamba={counts['mamba']}, hybrid={counts['hybrid']}"
+            f"mamba={counts['mamba']}, cross_attn={counts['cross_attn']}"
         )

@@ -159,12 +159,9 @@ class FlashCrossAttention(nn.Module):
         else:
             self.rope = None
 
-        # Learned temperature for attention scaling (initialized to sqrt(head_dim))
-        # Using log-space for numerical stability
+        # Softmax scale for attention (sqrt(head_dim) is standard)
         import math
-        self.log_temperature = nn.Parameter(
-            torch.tensor(math.log(math.sqrt(self.head_dim)), device=device, dtype=dtype or torch.float32)
-        )
+        self.softmax_scale = math.sqrt(self.head_dim)
 
     def forward(
         self,
@@ -178,9 +175,6 @@ class FlashCrossAttention(nn.Module):
         max_seqlen_k: Optional[int] = None,
     ) -> torch.Tensor:
         is_packed = cu_seqlens_q is not None
-
-        # Compute learned softmax scale (temperature)
-        softmax_scale = self.log_temperature.exp().item()
 
         if is_packed:
             residual = x
@@ -207,7 +201,7 @@ class FlashCrossAttention(nn.Module):
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlen_k,
                 dropout_p=self.dropout if self.training else 0.0,
-                softmax_scale=softmax_scale,
+                softmax_scale=self.softmax_scale,
                 causal=False,
             )
 
@@ -257,7 +251,7 @@ class FlashCrossAttention(nn.Module):
                     q_sdpa, k_sdpa, v_sdpa,
                     attn_mask=attn_mask,
                     dropout_p=self.dropout if self.training else 0.0,
-                    scale=softmax_scale,
+                    scale=self.softmax_scale,
                     is_causal=False,
                 )
                 out = out.transpose(1, 2)
@@ -265,7 +259,7 @@ class FlashCrossAttention(nn.Module):
                 out = flash_attn_func(
                     q, k, v,
                     dropout_p=self.dropout if self.training else 0.0,
-                    softmax_scale=softmax_scale,
+                    softmax_scale=self.softmax_scale,
                     causal=False,
                 )
 

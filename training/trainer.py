@@ -1,34 +1,28 @@
-"""NMT Trainer with H100/BF16 optimization and distributed training support."""
+"""NMT Trainer with distributed training support."""
 
+import logging
 import os
+import sys
 import time
 import random
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Callable, Iterator
+from typing import Optional, Dict, Callable, Iterator, Any
 import math
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 
 import psutil
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, DistributedSampler
-from torch.cuda.amp import autocast
 
-from .objectives import create_loss_fn, create_scheduler
-from .distributed import (
-    DistributedConfig,
-    setup_distributed,
-    cleanup_distributed,
-    wrap_model_distributed,
-    print_distributed_info,
-    all_reduce_mean,
-    barrier,
-)
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+from .objectives import LabelSmoothingCrossEntropy, CosineAnnealingWarmupScheduler
 from ..models.utils import get_unwrapped_model, split_params_for_weight_decay
-from ..models.align_mamba import CurriculumDropout
 from ..constants import (
     ADAM_BETAS, ADAM_EPS, LOG_STEPS, EVAL_STEPS, SAVE_STEPS,
     MIN_LR, MIN_WARMUP_STEPS, WEIGHT_DECAY, WARMUP_RATIO,
@@ -36,6 +30,92 @@ from ..constants import (
     GRADIENT_CHECKPOINTING,
 )
 
+# PyTorch backend optimizations (TF32, Flash SDP, cuDNN)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
+torch.set_float32_matmul_precision("high")
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+
+# Module-level logger, configured by setup_distributed()
+logger = logging.getLogger("align_mamba")
+
+
+# =============================================================================
+# Distributed Training Utilities
+# =============================================================================
+
+def _configure_logging(is_main: bool):
+    """Configure logger to only emit on main rank."""
+    logger.setLevel(logging.INFO if is_main else logging.WARNING)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+        logger.propagate = False
+
+
+def setup_distributed() -> Dict[str, Any]:
+    """Setup distributed training. Assumes torchrun launcher for multi-GPU."""
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        info = {
+            "rank": rank,
+            "local_rank": int(os.environ.get("LOCAL_RANK", 0)),
+            "world_size": dist.get_world_size(),
+            "device": torch.device(f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}"),
+            "is_main": rank == 0,
+        }
+        _configure_logging(info["is_main"])
+        return info
+
+    if "RANK" not in os.environ:
+        info = {
+            "rank": 0,
+            "local_rank": 0,
+            "world_size": 1,
+            "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            "is_main": True,
+        }
+        _configure_logging(True)
+        return info
+
+    dist.init_process_group(backend="nccl")
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+
+    rank = dist.get_rank()
+    info = {
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": dist.get_world_size(),
+        "device": device,
+        "is_main": rank == 0,
+    }
+    _configure_logging(info["is_main"])
+    return info
+
+
+def cleanup_distributed():
+    """Cleanup distributed training."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def barrier():
+    """Synchronization barrier."""
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.barrier()
+
+
+# =============================================================================
+# Training Utilities
+# =============================================================================
 
 def adaptive_gradient_clip_(
     parameters: Iterator[nn.Parameter],
@@ -58,27 +138,31 @@ def compute_adaptive_smoothing(vocab_size: int, base_smoothing: float = 0.1) -> 
     return base_smoothing * math.log2(vocab_size) / math.log2(32768)
 
 
-@dataclass
-class NMTTrainerConfig:
-    """Simplified trainer config - infrastructure values hardcoded in constants.py."""
-    seed: int = 42
-    max_steps: int = 5000
-    batch_size: int = 64
-    learning_rate: float = 1e-4
-    label_smoothing: Optional[float] = None  # None = adaptive
-    output_dir: str = "outputs"
-
+# =============================================================================
+# NMT Trainer
+# =============================================================================
 
 class NMTTrainer:
     def __init__(
         self,
         model: nn.Module,
         train_dataloader: DataLoader,
-        config: Optional[NMTTrainerConfig] = None,
+        seed: int = 42,
+        max_steps: int = 5000,
+        batch_size: int = 64,
+        learning_rate: float = 1e-4,
+        label_smoothing: Optional[float] = None,
+        output_dir: str = "outputs",
         eval_dataloader: Optional[DataLoader] = None,
         eval_fn: Optional[Callable] = None,
     ):
-        self.config = config or NMTTrainerConfig()
+        self.seed = seed
+        self.max_steps = max_steps
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.label_smoothing = label_smoothing
+        self.output_dir = Path(output_dir)
+
         self.model = model
         self.train_dataloader = train_dataloader
         self.eval_dataloader = eval_dataloader
@@ -89,104 +173,71 @@ class NMTTrainer:
         self.is_main = self.dist_info["is_main"]
         self.world_size = self.dist_info["world_size"]
 
-        print_distributed_info(self.dist_info)
-        self._setup_reproducibility()
-        self._setup_h100_optimizations()
+        logger.info("=" * 60)
+        logger.info("DISTRIBUTED TRAINING INFO")
+        logger.info("=" * 60)
+        logger.info(f"World Size: {self.world_size}")
+        logger.info(f"Device: {self.device}")
+        logger.info("=" * 60)
+
+        # Reproducibility
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
         if GRADIENT_CHECKPOINTING and hasattr(self.model, 'gradient_checkpointing_enable'):
             self.model.gradient_checkpointing_enable()
 
-        # torch.compile BEFORE distributed wrapping for optimal performance
         if USE_COMPILE:
             self.model = torch.compile(self.model, mode=COMPILE_MODE)
 
-        if self.world_size > 1:
-            dist_config = DistributedConfig(strategy="ddp")
-            self.model = wrap_model_distributed(
-                self.model, dist_config, self.device, use_bf16=USE_BF16
+        self.model = self.model.to(self.device)
+        if self.world_size > 1 and dist.is_initialized():
+            self.model = DDP(
+                self.model,
+                device_ids=[self.device.index] if self.device.type == "cuda" else None,
+                gradient_as_bucket_view=True,
+                static_graph=True,
+                bucket_cap_mb=512,
             )
-        else:
-            self.model = self.model.to(self.device)
 
         self.optimizer = self._create_optimizer()
 
-        # Adaptive warmup: ratio of max_steps with minimum floor
-        adaptive_warmup = max(
-            int(self.config.max_steps * WARMUP_RATIO),
-            MIN_WARMUP_STEPS,
-        )
-        if self.is_main:
-            print(f"Warmup steps: {adaptive_warmup} ({WARMUP_RATIO*100:.0f}% of {self.config.max_steps})")
+        adaptive_warmup = max(int(self.max_steps * WARMUP_RATIO), MIN_WARMUP_STEPS)
+        logger.info(f"Warmup steps: {adaptive_warmup} ({WARMUP_RATIO*100:.0f}% of {self.max_steps})")
 
-        self.scheduler = create_scheduler(
-            optimizer=self.optimizer,
+        self.scheduler = CosineAnnealingWarmupScheduler(
+            self.optimizer,
             warmup_steps=adaptive_warmup,
-            max_steps=self.config.max_steps,
+            max_steps=self.max_steps,
             min_lr=MIN_LR,
         )
 
-        # Adaptive label smoothing based on vocab size
-        if self.config.label_smoothing is not None:
-            smoothing = self.config.label_smoothing
+        if self.label_smoothing is not None:
+            smoothing = self.label_smoothing
         else:
             vocab_size = getattr(getattr(model, 'config', None), 'vocab_size', 8192)
             smoothing = compute_adaptive_smoothing(vocab_size)
-            if self.is_main:
-                print(f"Adaptive label smoothing: {smoothing:.4f} (vocab_size={vocab_size})")
+            logger.info(f"Adaptive label smoothing: {smoothing:.4f} (vocab_size={vocab_size})")
 
-        self.loss_fn = create_loss_fn(smoothing=smoothing)
+        self.loss_fn = LabelSmoothingCrossEntropy(smoothing=smoothing)
 
         self.global_step = 0
         self.epoch = 0
         self.best_metric = float("inf")
 
-        self.output_dir = Path(self.config.output_dir)
         if self.is_main:
             self.output_dir.mkdir(parents=True, exist_ok=True)
         barrier()
 
-    def _setup_h100_optimizations(self):
-        """Apply H100 optimizations. Assumes CUDA with Ampere+ GPU."""
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.set_float32_matmul_precision("high")
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.enabled = True
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
-        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-        if self.world_size > 1:
-            os.environ.setdefault("NCCL_P2P_LEVEL", "NVL")
-            os.environ.setdefault("NCCL_P2P_DISABLE", "0")
-            os.environ.setdefault("NCCL_IB_DISABLE", "1")
-            os.environ.setdefault("NCCL_DEBUG", "WARN")
-            os.environ.setdefault("NCCL_SOCKET_IFNAME", "^lo,docker")
-
-        if self.is_main:
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            print(f"GPU: {gpu_name} ({gpu_mem:.0f}GB)")
-            print(f"Optimizations: TF32=Y, FlashSDP=Y, cuDNN=Y")
-
-    def _setup_reproducibility(self):
-        seed = self.config.seed
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        if self.is_main:
-            print(f"Random seed: {seed}")
-
     def _create_optimizer(self) -> torch.optim.Optimizer:
         optimizer_groups = split_params_for_weight_decay(self.model, WEIGHT_DECAY)
         use_fused = self.device.type == "cuda"
-        if self.is_main:
-            print(f"Using AdamW optimizer (fused={use_fused})")
+        logger.info(f"Using AdamW optimizer (fused={use_fused})")
         return torch.optim.AdamW(
             optimizer_groups,
-            lr=self.config.learning_rate,
+            lr=self.learning_rate,
             betas=ADAM_BETAS,
             eps=ADAM_EPS,
             fused=use_fused,
@@ -235,7 +286,7 @@ class NMTTrainer:
         if hasattr(self.train_dataloader, 'sampler') and hasattr(self.train_dataloader.sampler, 'set_epoch'):
             self.train_dataloader.sampler.set_epoch(self.epoch)
 
-        while self.global_step < self.config.max_steps:
+        while self.global_step < self.max_steps:
             try:
                 batch = next(data_iter)
             except StopIteration:
@@ -247,19 +298,17 @@ class NMTTrainer:
 
             batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
-            with autocast(dtype=torch.bfloat16, enabled=USE_BF16):
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=USE_BF16):
                 loss = self._training_step(batch)
 
             if torch.isnan(loss) or torch.isinf(loss):
-                if self.is_main:
-                    print(f"WARNING: NaN/Inf loss at step {self.global_step}, skipping")
+                logger.warning(f"NaN/Inf loss at step {self.global_step}, skipping")
                 self.optimizer.zero_grad(set_to_none=True)
                 continue
 
             loss.backward()
             accumulated_loss = accumulated_loss + loss.detach()
 
-            # Adaptive Gradient Clipping
             if USE_AGC:
                 adaptive_gradient_clip_(self.model.parameters())
 
@@ -268,28 +317,27 @@ class NMTTrainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             self.global_step += 1
-            self._step_curriculum_dropout()
 
             if self.global_step % LOG_STEPS == 0:
-                if self.world_size > 1:
-                    accumulated_loss = all_reduce_mean(accumulated_loss)
+                if self.world_size > 1 and dist.is_initialized():
+                    dist.all_reduce(accumulated_loss, op=dist.ReduceOp.SUM)
+                    accumulated_loss /= self.world_size
 
-                if self.is_main:
-                    elapsed = time.time() - step_start_time
-                    steps_per_sec = LOG_STEPS / elapsed
-                    samples_per_sec = steps_per_sec * self.config.batch_size * self.world_size
-                    lr = self.scheduler.get_last_lr()[0]
-                    mem_alloc = torch.cuda.memory_allocated() / (1024**3)
-                    mem_reserved = torch.cuda.memory_reserved() / (1024**3)
+                elapsed = time.time() - step_start_time
+                steps_per_sec = LOG_STEPS / elapsed
+                samples_per_sec = steps_per_sec * self.batch_size * self.world_size
+                lr = self.scheduler.get_last_lr()[0]
+                mem_alloc = torch.cuda.memory_allocated() / (1024**3)
+                mem_reserved = torch.cuda.memory_reserved() / (1024**3)
 
-                    print(
-                        f"Step {self.global_step}/{self.config.max_steps} | "
-                        f"Loss: {accumulated_loss.item():.4f} | "
-                        f"LR: {lr:.2e} | "
-                        f"Steps/s: {steps_per_sec:.2f} | "
-                        f"Samples/s: {samples_per_sec:.1f} | "
-                        f"Mem: {mem_alloc:.1f}/{mem_reserved:.1f}GB"
-                    )
+                logger.info(
+                    f"Step {self.global_step}/{self.max_steps} | "
+                    f"Loss: {accumulated_loss.item():.4f} | "
+                    f"LR: {lr:.2e} | "
+                    f"Steps/s: {steps_per_sec:.2f} | "
+                    f"Samples/s: {samples_per_sec:.1f} | "
+                    f"Mem: {mem_alloc:.1f}/{mem_reserved:.1f}GB"
+                )
 
                 accumulated_loss = torch.tensor(0.0, device=self.device)
                 step_start_time = time.time()
@@ -300,8 +348,7 @@ class NMTTrainer:
             if self.global_step % SAVE_STEPS == 0:
                 self._save_checkpoint()
 
-        if self.is_main:
-            print(f"Training complete! Final step: {self.global_step}")
+        logger.info(f"Training complete! Final step: {self.global_step}")
         cleanup_distributed()
 
     def _training_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -317,11 +364,9 @@ class NMTTrainer:
                 assert valid_labels.max() < vocab_size, f"Label {valid_labels.max().item()} exceeds vocab {vocab_size}"
 
         if "input_ids" in batch:
-            # MQAR decoder-only mode
             logits = self.model(None, batch["input_ids"])
             loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), batch["labels"].reshape(-1))
         else:
-            # Seq2seq mode
             src_ids, tgt_ids = batch["src_ids"], batch["tgt_ids"]
             labels = batch.get("labels", tgt_ids[:, 1:])
             decoder_input = tgt_ids[:, :-1]
@@ -331,23 +376,16 @@ class NMTTrainer:
 
         return loss
 
-    def _step_curriculum_dropout(self):
-        model = get_unwrapped_model(self.model)
-        for module in model.modules():
-            if isinstance(module, CurriculumDropout):
-                module.step()
-
     def _evaluate(self):
         if self.eval_fn is None or self.eval_dataloader is None:
             return
         self.model.eval()
         metrics = self.eval_fn(self.model, self.eval_dataloader, self.device)
         self.model.train()
-        if self.is_main:
-            print(f"Eval @ step {self.global_step}: {metrics}")
-            if "loss" in metrics and metrics["loss"] < self.best_metric:
-                self.best_metric = metrics["loss"]
-                self._save_checkpoint("best")
+        logger.info(f"Eval @ step {self.global_step}: {metrics}")
+        if "loss" in metrics and metrics["loss"] < self.best_metric:
+            self.best_metric = metrics["loss"]
+            self._save_checkpoint("best")
         barrier()
 
     def _save_checkpoint(self, name: Optional[str] = None):
@@ -385,7 +423,7 @@ class NMTTrainer:
         }
 
         torch.save(checkpoint, checkpoint_dir / "checkpoint.pt")
-        print(f"Saved checkpoint to {checkpoint_dir}")
+        logger.info(f"Saved checkpoint to {checkpoint_dir}")
         self._cleanup_checkpoints()
         barrier()
 
@@ -397,7 +435,7 @@ class NMTTrainer:
         while len(checkpoints) > keep_limit:
             oldest = checkpoints.pop(0)
             shutil.rmtree(oldest)
-            print(f"Removed old checkpoint: {oldest}")
+            logger.info(f"Removed old checkpoint: {oldest}")
 
     def load_checkpoint(self, checkpoint_path: str):
         checkpoint_dir = Path(checkpoint_path)
@@ -423,5 +461,4 @@ class NMTTrainer:
             if rng_state.get('cuda'):
                 torch.cuda.set_rng_state_all(rng_state['cuda'])
 
-        if self.is_main:
-            print(f"Loaded checkpoint: step={self.global_step}, epoch={self.epoch}")
+        logger.info(f"Loaded checkpoint: step={self.global_step}, epoch={self.epoch}")
