@@ -1,0 +1,41 @@
+# @package _global_
+#
+# d_state Scaling Experiment
+#
+# PURPOSE: Validate Random Matrix Theory prediction that Mamba
+# state capacity scales as O(d_state).
+#
+# Uses Pure Mamba (no cross-attention) to test state capacity limits.
+#
+# USAGE:
+#   python -m align_mamba.train -m experiment=04_d_state_scaling \
+#       model.d_state=32,64,128,256 data.num_pairs=16,32,64,96,128,192,256
+
+defaults:
+  - override /data: mqar
+  - override /model: hybrid_small
+  - override /training: default
+
+experiment_name: d_state_scaling
+
+project:
+  name: d-state-scaling
+  output_dir: outputs/04_d_state_scaling
+
+model:
+  vocab_size: 8192
+  d_model: 256
+  encoder_layers: 2
+  decoder_layers: 4
+  d_state: 64
+  n_heads: 8
+  hybrid_positions: []
+
+data:
+  num_pairs: 64
+  num_queries: 16
+
+training:
+  max_steps: 5000
+  batch_size: 64
+  learning_rate: 1e-4

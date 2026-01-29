@@ -1,0 +1,44 @@
+# Default training configuration for 1x H100 80GB HBM3
+# Optimized for maximum throughput on single GPU
+
+# Batch Size
+batch_size: 256
+gradient_accumulation_steps: 1
+
+# Training Loop
+max_steps: 100000
+
+# Optimization
+learning_rate: 3e-4
+weight_decay: 0.01
+
+# Adaptive Gradient Clipping (AGC) - Brock et al., 2021
+use_agc: true
+agc_clip_factor: 0.01
+
+# Learning Rate Schedule
+scheduler_type: cosine
+warmup_ratio: 0.05
+
+# Label Smoothing (null = auto-scale based on vocab_size)
+label_smoothing: null
+
+# Precision - H100 native BF16 (never use FP16)
+use_bf16: true
+
+# torch.compile for H100 (~20-30% speedup)
+use_compile: true
+compile_mode: max-autotune
+
+# Memory Optimization
+gradient_checkpointing: true
+
+# Distributed (Single H100 - DDP disabled)
+distributed_strategy: none
+static_graph: true
+
+# Logging and Checkpointing
+log_steps: 100
+eval_steps: 1000
+save_steps: 5000
+output_dir: outputs

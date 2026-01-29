@@ -1,0 +1,43 @@
+# @package _global_
+#
+# Hybrid Placement Ablation Experiment
+#
+# PURPOSE: Demonstrate that Layer 0 is critical ("Blind Start" fix)
+# - hybrid_positions=[]        -> Pure Mamba (~0% at num_pairs=128)
+# - hybrid_positions=[0]       -> Blind Start fix only (~85-90%)
+# - hybrid_positions=[0,2]     -> Minimal hybrid (~95%)
+# - hybrid_positions=[0,8,16]  -> Full spread (~95%, no benefit over [0,2])
+# - hybrid_positions=[8,16]    -> No Layer 0 (~0%, proves hypothesis)
+#
+# USAGE:
+#   python -m align_mamba.train -m experiment=02_mechanism_ablation \
+#       'model.hybrid_positions=[],[0],[0,2],[0,8,16],[8,16]' 'seed=42,1337,2024'
+
+defaults:
+  - override /data: mqar
+  - override /model: hybrid_small
+  - override /training: default
+
+experiment_name: hybrid_placement_ablation
+
+project:
+  name: mechanism-ablation
+  output_dir: outputs/02_mechanism
+
+model:
+  vocab_size: 8192
+  d_model: 256
+  encoder_layers: 2
+  decoder_layers: 24
+  d_state: 64
+  n_heads: 8
+  hybrid_positions: [0, 2]
+
+data:
+  num_pairs: 128
+  num_queries: 16
+
+training:
+  max_steps: 5000
+  batch_size: 64
+  learning_rate: 1e-4

@@ -1,0 +1,28 @@
+# Main configuration file
+# Uses Hydra's defaults system for composability
+#
+# Usage:
+#   python -m align_mamba.train                           # Use defaults
+#   python -m align_mamba.train experiment=01_proof_mqar_cliff  # Use experiment config
+#   python -m align_mamba.train model=hybrid_small training.batch_size=32  # Override
+
+defaults:
+  - model: hybrid_small
+  - training: default
+  - data: mqar
+  - optional experiment: null
+  - _self_
+
+# Project settings
+project:
+  name: align_mamba
+  seed: 42
+  output_dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Hydra settings
+hydra:
+  run:
+    dir: ${project.output_dir}
+  sweep:
+    dir: outputs/sweeps/${now:%Y-%m-%d}
+    subdir: ${hydra.job.num}

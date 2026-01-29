@@ -36,13 +36,13 @@ wheels/
 
 # Training outputs and checkpoints
 outputs/
-doc_nmt_mamba/outputs/
+align_mamba/outputs/
 *.pt
 *.pth
 *.ckpt
 checkpoints/
 
-# Data files and directories (but NOT the doc_nmt_mamba/data/ source code!)
+# Data files and directories (but NOT the align_mamba/data/ source code!)
 /data/
 datasets/
 
@@ -62,7 +62,7 @@ datasets/
 
 # Tokenizer files (but keep the project's tokenizer configs)
 *.model
-# Note: tokenizer.json files in doc_nmt_mamba/data/tokenizer/ are tracked via git add -f
+# Note: tokenizer.json files in align_mamba/data/tokenizer/ are tracked via git add -f
 
 # Experiment results and logs
 experiments/

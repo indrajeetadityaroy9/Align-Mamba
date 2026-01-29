@@ -1,0 +1,44 @@
+# @package _global_
+#
+# MQAR Capacity Cliff Experiment
+#
+# PURPOSE: Prove the Capacity-Offloading Hypothesis
+# - Pure Mamba (hybrid_positions=[]): State overflows at num_pairs > d_state -> ~0% accuracy
+# - Hybrid (hybrid_positions=[0,2]): Cross-attention retrieves from encoder -> high accuracy
+#
+# USAGE:
+#   python -m align_mamba.train experiment=01_proof_mqar_cliff model.hybrid_positions=[]
+#   python -m align_mamba.train experiment=01_proof_mqar_cliff model.hybrid_positions=[0,2]
+#
+#   # Multi-seed sweep
+#   python -m align_mamba.train -m experiment=01_proof_mqar_cliff \
+#       project.seed=42,1337,2024 model.hybrid_positions=[],[0,2] data.num_pairs=64,128
+
+defaults:
+  - override /data: mqar
+  - override /model: hybrid_small
+  - override /training: default
+
+experiment_name: mqar_capacity_cliff
+
+project:
+  name: mqar-capacity-proof
+  output_dir: outputs/01_mqar_cliff
+
+model:
+  vocab_size: 8192
+  d_model: 256
+  encoder_layers: 2
+  decoder_layers: 4
+  d_state: 64
+  n_heads: 8
+  hybrid_positions: [0, 2]
+
+data:
+  num_pairs: 64
+  num_queries: 16
+
+training:
+  max_steps: 5000
+  batch_size: 64
+  learning_rate: 1e-4
