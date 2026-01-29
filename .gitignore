@@ -31,6 +31,9 @@ wheels/
 .installed.cfg
 *.egg
 
+# Pip artifacts (version files created by pip install)
+=*
+
 # Training outputs and checkpoints
 outputs/
 doc_nmt_mamba/outputs/
@@ -61,8 +64,9 @@ datasets/
 *.model
 # Note: tokenizer.json files in doc_nmt_mamba/data/tokenizer/ are tracked via git add -f
 
-# Experiment results (large files)
+# Experiment results and logs
 experiments/
+logs/
 *.log
 
 # HuggingFace cache

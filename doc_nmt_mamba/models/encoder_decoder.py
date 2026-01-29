@@ -1,11 +1,6 @@
-"""
-Encoder-Decoder wrapper and Model Configuration.
+"""Encoder-Decoder wrapper and ModelConfig."""
 
-Contains:
-- ModelConfig: Configuration dataclass for the hybrid model
-- HybridMambaEncoderDecoder: Full encoder-decoder model
-"""
-
+import math
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Tuple, List
 
@@ -18,85 +13,100 @@ from .align_mamba import (
 )
 
 
-# =============================================================================
-# Model Configuration
-# =============================================================================
+def compute_adaptive_d_state(
+    max_seq_len: int,
+    vocab_size: int,
+    min_d_state: int = 64,
+    max_d_state: int = 512,
+) -> int:
+    """
+    Compute adaptive d_state from sequence length using Random Matrix Theory.
+
+    Formula: d_state = min(max_cap, max(64, 2^round(log2(sqrt(L) * log2(V) / 4))))
+
+    The SSM state capacity must scale with O(sqrt(L)) for associative recall tasks.
+    log2(vocab_size) accounts for per-token information entropy.
+
+    Args:
+        max_seq_len: Maximum sequence length
+        vocab_size: Vocabulary size
+        min_d_state: Minimum d_state (default 64)
+        max_d_state: Maximum d_state cap (default 512)
+
+    Returns:
+        Adaptive d_state value (power of 2 for efficiency)
+    """
+    raw = math.sqrt(max_seq_len) * math.log2(vocab_size) / 4
+    # Round to nearest power of 2 for computational efficiency
+    computed = max(min_d_state, 2 ** round(math.log2(raw)))
+    return min(max_d_state, computed)
+
 
 @dataclass
 class ModelConfig:
-    """Configuration for the Hybrid Mamba-Attention model.
-
-    ARCHITECTURE:
-    - Decoder uses HYBRID blocks at [0, 8, 16] for 24-layer model
-    - Each HYBRID block contains Mamba + Cross-Attention
-    - Ratio: 3/24 = 1:8 = 12.5%
     """
-    vocab_size: int = 32000
+    Configuration for the Hybrid Mamba-Attention model.
+
+    Adaptive parameters (set to None for auto-computation):
+    - d_state: Computed from max_seq_len and vocab_size (Random Matrix Theory)
+    - attention_ratio: Computed as 2/encoder_layers (guarantees 2 attention layers)
+    - hybrid_positions: Computed as [0, N//3, 2N//3] for N decoder layers
+    """
+    vocab_size: int = 32768
     d_model: int = 768
     encoder_layers: int = 16
-    decoder_layers: int = 24  # For [0, 8, 16] pattern
-    d_state: int = 128
+    decoder_layers: int = 24
+    d_state: Optional[int] = None  # None = adaptive from max_seq_len/vocab_size
     d_conv: int = 4
     expand: int = 2
     n_heads: int = 12
-    attention_ratio: float = 0.125  # 1:7 ratio for encoder
-    hybrid_interval: int = 8  # Interval between HYBRID blocks
-    cross_attn_every: int = 8  # Alias for hybrid_interval (backward compat)
-    custom_hybrid_positions: Optional[List[int]] = None  # For ablation experiments
+    attention_ratio: Optional[float] = None  # None = adaptive (2/encoder_layers)
+    hybrid_positions: Optional[List[int]] = None  # None = scale-invariant formula
     dropout: float = 0.1
     max_seq_len: int = 8192
     pad_token_id: int = 0
     bos_token_id: int = 1
     eos_token_id: int = 2
+    mimetic_init: bool = False  # Zero A_log for mimetic initialization (Trockman et al., 2024)
 
     @property
     def head_dim(self) -> int:
         return self.d_model // self.n_heads
 
 
-# =============================================================================
-# Full Encoder-Decoder Model
-# =============================================================================
-
 class HybridMambaEncoderDecoder(nn.Module):
     """
-    Full Encoder-Decoder model with Hybrid Mamba-Attention architecture.
+    Full Encoder-Decoder with Hybrid Mamba-Attention architecture.
 
-    Features:
-    - BiMamba encoder with sparse bidirectional attention
-    - Causal Mamba decoder with HYBRID blocks at [0, 8, 16]
-    - Efficient autoregressive generation with hybrid state management
-    - Gradient checkpointing support for long sequences
-
-    Target performance (200M params on H100):
-    - Training: batch_size=64, seq_len=8192
-    - Inference: O(L_src) + O(1) per token (vs O(L_src + L_tgt) for Transformer)
+    Supports adaptive hyperparameters (set to None for auto-computation):
+    - d_state: Computed from max_seq_len and vocab_size
+    - attention_ratio: Computed as 2/encoder_layers
+    - hybrid_positions: Computed via scale-invariant formula
     """
 
     def __init__(
         self,
         config: Optional[ModelConfig] = None,
-        vocab_size: int = 32000,
+        vocab_size: int = 32768,
         d_model: int = 768,
         encoder_layers: int = 16,
         decoder_layers: int = 24,
-        d_state: int = 128,
+        d_state: Optional[int] = None,  # None = adaptive
         n_heads: int = 12,
-        attention_ratio: float = 0.125,
-        hybrid_interval: int = 8,
-        custom_hybrid_positions: Optional[List[int]] = None,
+        attention_ratio: Optional[float] = None,  # None = adaptive
+        hybrid_positions: Optional[List[int]] = None,  # None = adaptive
         dropout: float = 0.1,
         max_seq_len: int = 8192,
         pad_token_id: int = 0,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         share_embeddings: bool = True,
+        mimetic_init: bool = False,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
 
-        # Use config if provided
         if config is not None:
             vocab_size = config.vocab_size
             d_model = config.d_model
@@ -105,15 +115,20 @@ class HybridMambaEncoderDecoder(nn.Module):
             d_state = config.d_state
             n_heads = config.n_heads
             attention_ratio = config.attention_ratio
-            hybrid_interval = config.hybrid_interval
-            custom_hybrid_positions = config.custom_hybrid_positions
+            hybrid_positions = config.hybrid_positions
             dropout = config.dropout
             max_seq_len = config.max_seq_len
             pad_token_id = config.pad_token_id
             bos_token_id = config.bos_token_id
             eos_token_id = config.eos_token_id
+            mimetic_init = config.mimetic_init
 
-        # Store config
+        # Compute adaptive d_state if not specified
+        if d_state is None:
+            d_state = compute_adaptive_d_state(max_seq_len, vocab_size)
+
+        # Store computed values in config (hybrid_positions/attention_ratio remain None
+        # and are computed by the encoder/decoder themselves)
         self.config = ModelConfig(
             vocab_size=vocab_size,
             d_model=d_model,
@@ -122,19 +137,17 @@ class HybridMambaEncoderDecoder(nn.Module):
             d_state=d_state,
             n_heads=n_heads,
             attention_ratio=attention_ratio,
-            hybrid_interval=hybrid_interval,
-            cross_attn_every=hybrid_interval,
-            custom_hybrid_positions=custom_hybrid_positions,
+            hybrid_positions=hybrid_positions,
             dropout=dropout,
             max_seq_len=max_seq_len,
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
+            mimetic_init=mimetic_init,
         )
 
         factory_kwargs = {"device": device, "dtype": dtype}
 
-        # Encoder
         self.encoder = HybridBiMambaEncoder(
             vocab_size=vocab_size,
             d_model=d_model,
@@ -148,24 +161,44 @@ class HybridMambaEncoderDecoder(nn.Module):
             **factory_kwargs,
         )
 
-        # Decoder with HYBRID blocks
         self.decoder = HybridMambaDecoder(
             vocab_size=vocab_size,
             d_model=d_model,
             n_layers=decoder_layers,
             d_state=d_state,
             n_heads=n_heads,
-            hybrid_interval=hybrid_interval,
-            custom_hybrid_positions=custom_hybrid_positions,
+            hybrid_positions=hybrid_positions,
             dropout=dropout,
             max_seq_len=max_seq_len,
             pad_token_id=pad_token_id,
             **factory_kwargs,
         )
 
-        # Optionally share embeddings
         if share_embeddings:
             self.decoder.embed.weight = self.encoder.embed.weight
+
+        # Apply mimetic initialization if enabled (Trockman et al., 2024)
+        # Zeros A_log so SSM behaves like attention at initialization
+        if mimetic_init:
+            self._apply_mimetic_init()
+
+    def _apply_mimetic_init(self):
+        """Zero A_log in all Mamba2 layers for mimetic initialization.
+
+        This makes the SSM act like a weighted sum at initialization,
+        helping Mamba learn copy/recall tasks faster (2x length generalization).
+        Reference: Trockman et al., "Mimetic Initialization Helps State Space
+        Models Learn to Recall", arXiv:2410.11135, 2024.
+        """
+        for module in self.modules():
+            # Handle Mamba2BlockWrapper (has self.mamba)
+            if hasattr(module, 'mamba') and hasattr(module.mamba, 'A_log'):
+                nn.init.zeros_(module.mamba.A_log)
+            # Handle BiMambaBlock (has mamba_fwd and mamba_bwd)
+            if hasattr(module, 'mamba_fwd') and hasattr(module.mamba_fwd, 'A_log'):
+                nn.init.zeros_(module.mamba_fwd.A_log)
+            if hasattr(module, 'mamba_bwd') and hasattr(module.mamba_bwd, 'A_log'):
+                nn.init.zeros_(module.mamba_bwd.A_log)
 
     def forward(
         self,
@@ -174,25 +207,40 @@ class HybridMambaEncoderDecoder(nn.Module):
         src_mask: Optional[torch.Tensor] = None,
         tgt_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Forward pass for training.
+        """Forward pass. Returns logits (batch, tgt_len, vocab_size)."""
+        max_len = self.config.max_seq_len
+        if src_ids is not None and src_ids.size(1) > max_len:
+            raise ValueError(
+                f"Source sequence length ({src_ids.size(1)}) exceeds max_seq_len ({max_len})."
+            )
+        if tgt_ids.size(1) > max_len:
+            raise ValueError(
+                f"Target sequence length ({tgt_ids.size(1)}) exceeds max_seq_len ({max_len})."
+            )
 
-        Args:
-            src_ids: Source token IDs (batch, src_len) or None for decoder-only mode
-            tgt_ids: Target token IDs (batch, tgt_len)
-            src_mask: Optional source attention mask
-            tgt_mask: Optional target attention mask
-
-        Returns:
-            Logits (batch, tgt_len, vocab_size)
-        """
-        # Decoder-only mode: skip encoder when src_ids is None or encoder has 0 layers
+        # Decoder-only mode when src_ids is None or encoder has 0 layers
         if src_ids is None or self.config.encoder_layers == 0:
             encoder_out = None
+            encoder_padding_mask = None
         else:
             encoder_out = self.encoder(src_ids, attention_mask=src_mask)
+            encoder_padding_mask = src_mask
 
-        logits = self.decoder(tgt_ids, encoder_out, attention_mask=tgt_mask)
+        logits = self.decoder(
+            tgt_ids,
+            encoder_out,
+            attention_mask=tgt_mask,
+            encoder_padding_mask=encoder_padding_mask,
+        )
+
+        # Shape invariants (LOCK-2: catch silent dimension bugs)
+        assert logits.shape[:2] == tgt_ids.shape[:2], (
+            f"Logits shape {logits.shape[:2]} != tgt shape {tgt_ids.shape[:2]}"
+        )
+        assert logits.shape[2] == self.config.vocab_size, (
+            f"Logits vocab dim {logits.shape[2]} != config {self.config.vocab_size}"
+        )
+
         return logits
 
     def encode(
@@ -200,7 +248,6 @@ class HybridMambaEncoderDecoder(nn.Module):
         src_ids: torch.Tensor,
         src_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Encode source sequence."""
         return self.encoder(src_ids, attention_mask=src_mask)
 
     def init_generation_cache(
@@ -209,7 +256,6 @@ class HybridMambaEncoderDecoder(nn.Module):
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> Dict:
-        """Initialize cache for autoregressive generation."""
         batch_size = encoder_out.size(0)
         return self.decoder.init_cache(batch_size, encoder_out, device, dtype)
 
@@ -218,7 +264,6 @@ class HybridMambaEncoderDecoder(nn.Module):
         input_ids: torch.Tensor,
         cache: Dict,
     ) -> Tuple[torch.Tensor, Dict]:
-        """Single generation step."""
         return self.decoder.step(input_ids, cache)
 
     @torch.no_grad()
@@ -231,20 +276,12 @@ class HybridMambaEncoderDecoder(nn.Module):
         top_p: Optional[float] = None,
         src_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Autoregressive generation with greedy/sampling decoding.
+        """Autoregressive generation. Returns (batch, gen_len)."""
+        if src_ids.size(1) > self.config.max_seq_len:
+            raise ValueError(
+                f"Source sequence length ({src_ids.size(1)}) exceeds max_seq_len ({self.config.max_seq_len})."
+            )
 
-        Args:
-            src_ids: Source token IDs (batch, src_len)
-            max_length: Maximum generation length
-            temperature: Sampling temperature
-            top_k: Top-k sampling
-            top_p: Top-p (nucleus) sampling
-            src_mask: Optional source attention mask
-
-        Returns:
-            Generated token IDs (batch, gen_len)
-        """
         batch_size = src_ids.size(0)
         device = src_ids.device
 
@@ -287,7 +324,6 @@ class HybridMambaEncoderDecoder(nn.Module):
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
     ) -> torch.Tensor:
-        """Sample with top-k and/or top-p filtering."""
         if top_k is not None:
             indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
             logits[indices_to_remove] = float("-inf")
@@ -307,17 +343,14 @@ class HybridMambaEncoderDecoder(nn.Module):
         return next_token
 
     def gradient_checkpointing_enable(self):
-        """Enable gradient checkpointing for both encoder and decoder."""
         self.encoder.gradient_checkpointing_enable()
         self.decoder.gradient_checkpointing_enable()
 
     def gradient_checkpointing_disable(self):
-        """Disable gradient checkpointing."""
         self.encoder.gradient_checkpointing_disable()
         self.decoder.gradient_checkpointing_disable()
 
     def num_parameters(self, only_trainable: bool = True) -> int:
-        """Count number of parameters."""
         if only_trainable:
             return sum(p.numel() for p in self.parameters() if p.requires_grad)
         return sum(p.numel() for p in self.parameters())

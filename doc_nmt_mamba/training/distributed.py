@@ -1,11 +1,4 @@
-"""
-Distributed Training Utilities for Multi-GPU Training.
-
-Supports:
-- DDP (DistributedDataParallel) for data parallelism
-- FSDP (FullyShardedDataParallel) for memory-efficient large model training
-- Automatic NVLink detection and optimization
-"""
+"""Distributed training utilities for multi-GPU training (DDP/FSDP)."""
 
 import os
 import socket
@@ -32,57 +25,34 @@ from functools import partial
 
 
 class DistributedStrategy(Enum):
-    """Distributed training strategies."""
-    NONE = "none"           # Single GPU
-    DDP = "ddp"             # DistributedDataParallel
-    FSDP = "fsdp"           # FullyShardedDataParallel
-    FSDP_FULL = "fsdp_full" # FSDP with full sharding
+    NONE = "none"
+    DDP = "ddp"
+    FSDP = "fsdp"
+    FSDP_FULL = "fsdp_full"
 
 
 @dataclass
 class DistributedConfig:
     """Configuration for distributed training."""
-
-    # Strategy
-    strategy: str = "ddp"  # "none", "ddp", "fsdp", "fsdp_full"
-
-    # DDP settings
-    find_unused_parameters: bool = False
+    strategy: str = "ddp"
     gradient_as_bucket_view: bool = True
-    static_graph: bool = True  # Enable for torch.compile compatibility
-
-    # H100 NVLink Optimization: Larger bucket size for fewer NCCL calls
-    # NVLink is extremely fast, so larger buckets reduce synchronization overhead
-    # 512MB optimal for high-bandwidth NVLink on H100 SXM5
-    bucket_cap_mb: int = 512  # Default 25MB, 512MB for NVLink
-
-    # FSDP settings
-    sharding_strategy: str = "full_shard"  # "full_shard", "shard_grad_op", "no_shard"
+    static_graph: bool = True  # Required for torch.compile compatibility
+    # 512MB bucket optimal for NVLink - reduces NCCL sync overhead vs default 25MB
+    bucket_cap_mb: int = 512
+    sharding_strategy: str = "full_shard"
     cpu_offload: bool = False
-    backward_prefetch: str = "backward_pre"  # "backward_pre", "backward_post", None
-    min_num_params: int = 1_000_000  # Min params per FSDP unit
-
-    # Mixed precision for FSDP
+    backward_prefetch: str = "backward_pre"
+    min_num_params: int = 1_000_000
     fsdp_mixed_precision: bool = True
-
-    # Process group
-    backend: str = "nccl"  # "nccl" for GPU, "gloo" for CPU
-
-    # Environment
+    backend: str = "nccl"
     master_addr: str = "localhost"
     master_port: str = "29500"
 
 
 def setup_distributed(config: Optional[DistributedConfig] = None) -> Dict[str, Any]:
-    """
-    Setup distributed training environment.
-
-    Returns:
-        Dict with rank, local_rank, world_size, device
-    """
+    """Setup distributed training environment. Returns dict with rank, local_rank, world_size, device."""
     config = config or DistributedConfig()
 
-    # Check if already initialized
     if dist.is_initialized():
         return {
             "rank": dist.get_rank(),
@@ -92,20 +62,24 @@ def setup_distributed(config: Optional[DistributedConfig] = None) -> Dict[str, A
             "is_main": dist.get_rank() == 0,
         }
 
-    # Check for distributed environment variables
     if "RANK" in os.environ:
-        # Launched with torchrun or similar
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
     elif torch.cuda.device_count() > 1:
-        # Multi-GPU but not launched distributed - setup for single process multi-GPU
+        # Multi-GPU detected but not using torchrun
+        # Recommend torchrun for proper multi-GPU setup
+        gpu_count = torch.cuda.device_count()
+        print(f"\n{'='*60}")
+        print(f"MULTI-GPU SETUP ({gpu_count} GPUs detected)")
+        print(f"{'='*60}")
+        print(f"For multi-GPU training, use torchrun:")
+        print(f"  torchrun --nproc_per_node={gpu_count} <script.py> ...")
+        print(f"{'='*60}\n")
         rank = 0
         local_rank = 0
         world_size = 1
-        print(f"Detected {torch.cuda.device_count()} GPUs. Use torchrun for multi-GPU training.")
     else:
-        # Single GPU
         return {
             "rank": 0,
             "local_rank": 0,
@@ -114,11 +88,9 @@ def setup_distributed(config: Optional[DistributedConfig] = None) -> Dict[str, A
             "is_main": True,
         }
 
-    # Set environment variables
     os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", config.master_addr)
     os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", config.master_port)
 
-    # Initialize process group
     if not dist.is_initialized() and world_size > 1:
         dist.init_process_group(
             backend=config.backend,
@@ -126,7 +98,6 @@ def setup_distributed(config: Optional[DistributedConfig] = None) -> Dict[str, A
             world_size=world_size,
         )
 
-    # Set device
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
 
@@ -146,19 +117,9 @@ def cleanup_distributed():
 
 
 def get_fsdp_mixed_precision(use_bf16: bool = True) -> MixedPrecision:
-    """Get FSDP mixed precision policy for H100."""
-    if use_bf16:
-        return MixedPrecision(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.bfloat16,
-            buffer_dtype=torch.bfloat16,
-        )
-    else:
-        return MixedPrecision(
-            param_dtype=torch.float32,
-            reduce_dtype=torch.float32,
-            buffer_dtype=torch.float32,
-        )
+    """Get FSDP mixed precision policy."""
+    dtype = torch.bfloat16 if use_bf16 else torch.float32
+    return MixedPrecision(param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype)
 
 
 def get_fsdp_sharding_strategy(strategy: str) -> ShardingStrategy:
@@ -189,18 +150,7 @@ def wrap_model_distributed(
     device: torch.device,
     use_bf16: bool = True,
 ) -> nn.Module:
-    """
-    Wrap model for distributed training.
-
-    Args:
-        model: Model to wrap
-        config: Distributed configuration
-        device: Device to use
-        use_bf16: Whether to use BF16 precision
-
-    Returns:
-        Wrapped model (DDP, FSDP, or original)
-    """
+    """Wrap model for distributed training (DDP or FSDP)."""
     strategy = DistributedStrategy(config.strategy)
 
     if strategy == DistributedStrategy.NONE:
@@ -211,43 +161,30 @@ def wrap_model_distributed(
         return model.to(device)
 
     if strategy == DistributedStrategy.DDP:
-        # Move model to device first
         model = model.to(device)
-
-        # Wrap with DDP
-        # H100 NVLink Optimization: Larger bucket_cap_mb reduces NCCL calls
-        # NVLink bandwidth is so high that fewer, larger allreduces are faster
+        # Larger bucket_cap_mb reduces NCCL calls - optimal for high-bandwidth NVLink
         model = DDP(
             model,
             device_ids=[device.index] if device.type == "cuda" else None,
-            find_unused_parameters=config.find_unused_parameters,
             gradient_as_bucket_view=config.gradient_as_bucket_view,
             static_graph=config.static_graph,
-            bucket_cap_mb=config.bucket_cap_mb,  # H100 NVLink optimization
+            bucket_cap_mb=config.bucket_cap_mb,
         )
 
     elif strategy in (DistributedStrategy.FSDP, DistributedStrategy.FSDP_FULL):
-        # Get FSDP wrapping policy
         auto_wrap_policy = partial(
             size_based_auto_wrap_policy,
             min_num_params=config.min_num_params,
         )
 
-        # Get mixed precision policy
         mixed_precision = None
         if config.fsdp_mixed_precision:
             mixed_precision = get_fsdp_mixed_precision(use_bf16)
 
-        # Get sharding strategy
         sharding_strategy = get_fsdp_sharding_strategy(config.sharding_strategy)
-
-        # Get backward prefetch
         backward_prefetch = get_backward_prefetch(config.backward_prefetch)
-
-        # CPU offload
         cpu_offload = CPUOffload(offload_params=True) if config.cpu_offload else None
 
-        # Wrap with FSDP
         model = FSDP(
             model,
             auto_wrap_policy=auto_wrap_policy,
@@ -273,7 +210,6 @@ def get_nvlink_info() -> Dict[str, Any]:
     if info["gpu_count"] < 2:
         return info
 
-    # Check P2P access between GPUs
     for i in range(info["gpu_count"]):
         for j in range(info["gpu_count"]):
             if i != j:
@@ -286,7 +222,7 @@ def get_nvlink_info() -> Dict[str, Any]:
 
 
 def print_distributed_info(dist_info: Dict[str, Any]):
-    """Print distributed training information."""
+    """Print distributed training information (main rank only)."""
     if not dist_info.get("is_main", True):
         return
 
@@ -298,7 +234,6 @@ def print_distributed_info(dist_info: Dict[str, Any]):
     print(f"Local Rank: {dist_info['local_rank']}")
     print(f"Device: {dist_info['device']}")
 
-    # NVLink info
     nvlink_info = get_nvlink_info()
     print(f"\nGPU Count: {nvlink_info['gpu_count']}")
     print(f"NVLink Available: {nvlink_info['nvlink_available']}")
@@ -306,7 +241,7 @@ def print_distributed_info(dist_info: Dict[str, Any]):
     if nvlink_info['p2p_available']:
         print("P2P Access:")
         for i, j, can_access in nvlink_info['p2p_available']:
-            status = "✓" if can_access else "✗"
+            status = "Y" if can_access else "N"
             print(f"  GPU {i} -> GPU {j}: {status}")
 
     print("=" * 60 + "\n")

@@ -1,21 +1,31 @@
 # Debug configuration for overfit sanity check
-# Use with: python scripts/train.py training=debug model=small
+# Use with: python scripts/train.py training=debug model=hybrid_small
 
 # Training loop - minimal for dry run
 max_steps: 50
 batch_size: 4
 gradient_accumulation_steps: 1
-max_grad_norm: 1.0
 
-# Optimization
+# Optimization - use AdamW for debug (faster startup than Prodigy)
+optimizer_type: adamw
 learning_rate: 1e-4
 weight_decay: 0.01
 betas: [0.9, 0.95]
+eps: 1e-8
+
+# Gradient clipping - use AGC for consistency
+use_agc: true
+agc_clip_factor: 0.01
+max_grad_norm: 1.0
 
 # Scheduling
 scheduler_type: cosine
-warmup_steps: 10
+warmup_ratio: 0.1       # 10% warmup for short debug runs
+min_warmup_steps: 5
 min_lr: 1e-6
+
+# Label smoothing - use fixed value for reproducibility in debug
+label_smoothing: 0.1
 
 # Memory optimization
 gradient_checkpointing: false  # Faster for debugging
@@ -28,6 +38,7 @@ compile_mode: default
 # H100 optimizations
 tf32_matmul: true
 cudnn_benchmark: true
+use_fused_optimizer: true
 
 # Logging and checkpointing - frequent for debugging
 log_steps: 1
@@ -36,12 +47,9 @@ save_steps: 100
 save_total_limit: 1
 output_dir: outputs/debug
 
-# Regularization
-label_smoothing: 0.1
-
-# Reproducibility
-seed: 42
-deterministic: false
+# Distributed
+distributed_strategy: none
+static_graph: true
 
 # Resume
 resume_from: null

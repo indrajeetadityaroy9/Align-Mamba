@@ -1,0 +1,59 @@
+# @package _global_
+#
+# d_state Scaling Experiment
+#
+# PURPOSE: Validate the Random Matrix Theory prediction that
+# Mamba state capacity scales as O(d_state).
+#
+# Uses Pure Mamba (no cross-attention) to test state capacity limits
+# at various d_state values.
+#
+# USAGE:
+#   # Single d_state value
+#   python doc_nmt_mamba/scripts/train.py experiment=04_d_state_scaling \
+#       model.d_state=64 data.mqar.num_pairs=64
+#
+#   # Hydra multirun for full sweep
+#   python doc_nmt_mamba/scripts/train.py -m experiment=04_d_state_scaling \
+#       model.d_state=32,64,128,256 \
+#       data.mqar.num_pairs=16,32,64,96,128,192,256
+#
+
+defaults:
+  - override /data: mqar
+  - override /model: hybrid_small
+  - override /training: default
+
+experiment_name: "d_state_scaling"
+seed: 42
+
+project:
+  name: "d-state-scaling"
+  output_dir: "outputs/04_d_state_scaling"
+
+model:
+  vocab_size: 8192
+  d_model: 256
+  encoder_layers: 2
+  decoder_layers: 4
+  d_state: 64  # Sweep: 32, 64, 128, 256
+  d_conv: 4
+  expand: 2
+  n_heads: 8
+  # Pure Mamba for capacity testing (no cross-attention retrieval)
+  hybrid_positions: []
+
+data:
+  dataset_name: "mqar"
+  num_samples: 10000
+  mode: "seq2seq"
+  num_pairs: 64  # Sweep to find capacity limit
+  num_queries: 16
+  seq_length: 512
+
+training:
+  max_steps: 5000
+  batch_size: 64
+  learning_rate: 1e-4
+  warmup_steps: 500
+  use_bf16: true

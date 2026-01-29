@@ -1,0 +1,81 @@
+# @package _global_
+#
+# MQAR Capacity Cliff Experiment
+#
+# PURPOSE: Prove the Capacity-Offloading Hypothesis
+# - Pure Mamba: Encoder stores KV pairs, but decoder has NO cross-attention.
+#   Information must be compressed into decoder's initial state.
+#   When num_pairs > d_state (64), state overflows -> accuracy drops to ~0%.
+# - Hybrid: Cross-attention at layers [0,2] can retrieve from encoder.
+#   Accuracy stays high even at 256 pairs.
+#
+# CRITICAL DESIGN NOTE:
+# Both Pure Mamba and Hybrid use an Encoder. The hypothesis is about
+# offloading retrieval from Mamba state TO the Encoder via Cross-Attention.
+# - Pure Mamba: Has encoder but decoder has NO cross-attention -> cannot access encoder after step 0
+# - Hybrid: Has encoder AND cross-attention -> can retrieve from encoder at layers [0, 2]
+#
+# USAGE:
+#   # Pure Mamba baseline (should fail at num_pairs > 64)
+#   python doc_nmt_mamba/scripts/train.py experiment=01_proof_mqar_cliff \
+#       model.hybrid_positions=[] data.mqar.num_pairs=64
+#
+#   # Hybrid model (should maintain accuracy)
+#   python doc_nmt_mamba/scripts/train.py experiment=01_proof_mqar_cliff \
+#       model.hybrid_positions=[0,2] data.mqar.num_pairs=128
+#
+# MULTI-SEED EXPERIMENTS (for statistical significance):
+#   # Run 5 seeds for each configuration using Hydra multirun
+#   python doc_nmt_mamba/scripts/train.py -m experiment=01_proof_mqar_cliff \
+#       project.seed=42,1337,2024,8675,309 \
+#       model.hybrid_positions=[],[0,2] \
+#       data.mqar.num_pairs=64,128
+#
+#   # Recommended learning rates to test: 1e-4, 3e-4, 1e-3
+#   # Per literature, LR sweep is crucial for fair SSM comparisons
+#
+# WATCH FOR "Blind Start" Scenario:
+# If Pure Mamba gets 0% accuracy even at num_pairs=4:
+# - This means there's NO encoder state transfer to decoder
+# - Use hybrid_positions=[0] as backup baseline (cross-attention only at layer 0)
+#
+defaults:
+  - override /data: mqar
+  - override /model: hybrid_small
+  - override /training: default
+
+experiment_name: "mqar_capacity_cliff"
+seed: 42
+
+project:
+  name: "mqar-capacity-proof"
+  output_dir: "outputs/01_mqar_cliff"
+
+model:
+  vocab_size: 8192
+  d_model: 256
+  encoder_layers: 2  # MUST be > 0: Encoder is the "External Memory Bank"
+  decoder_layers: 4
+  d_state: 64  # CRITICAL: Forces state capacity cliff
+  d_conv: 4
+  expand: 2
+  n_heads: 8
+  # Override via CLI: model.hybrid_positions=[] for Pure Mamba
+  # Override via CLI: model.hybrid_positions=[0,2] for Hybrid
+  hybrid_positions: [0, 2]
+
+data:
+  dataset_name: "mqar"
+  num_samples: 10000
+  mode: "seq2seq"  # CRITICAL: Use seq2seq mode for encoder-decoder
+  # Override via CLI: data.num_pairs=32,64,96,128,256
+  num_pairs: 64
+  num_queries: 16
+  seq_length: 512
+
+training:
+  max_steps: 5000
+  batch_size: 64
+  learning_rate: 1e-4
+  warmup_steps: 500
+  use_bf16: true

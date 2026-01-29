@@ -3,14 +3,14 @@
 #
 # Usage:
 #   python train.py                           # Use defaults
-#   python train.py experiment=main_iwslt_hybrid  # Use experiment config
+#   python train.py experiment=01_proof_mqar_cliff  # Use experiment config
 #   python train.py model=hybrid_small training.batch_size=32  # Override
 
 defaults:
   - model: hybrid_medium
   - training: default
-  - data: iwslt14_de_en
-  - optional experiment: null  # Optional experiment config (e.g., experiment=main_iwslt_hybrid)
+  - data: mqar
+  - optional experiment: null  # Optional experiment config
   - _self_
 
 # Project settings

@@ -1,28 +1,4 @@
-"""
-Checkpoint Utilities for Hybrid Mamba-Attention NMT.
-
-Publication-standard checkpoint format following NeurIPS/ICML/AISTATS guidelines:
-- Config ALWAYS embedded (required for reproducibility)
-- Full metadata for environment tracking
-- Single unified format (no legacy handling)
-
-Checkpoint Format:
-    {
-        'config': dict,  # ModelConfig as dict (REQUIRED)
-        'model_state_dict': state_dict,
-        'optimizer_state_dict': optimizer_state,  # Optional
-        'scheduler_state_dict': scheduler_state,  # Optional
-        'global_step': int,
-        'epoch': int,
-        'best_metric': float,
-        'metadata': {
-            'pytorch_version': str,
-            'cuda_version': str,
-            'timestamp': str,
-            'world_size': int,
-        }
-    }
-"""
+"""Checkpoint utilities with embedded config for reproducibility."""
 
 from dataclasses import asdict
 from datetime import datetime
@@ -39,20 +15,7 @@ def load_checkpoint(
     checkpoint_path: Union[str, Path],
     map_location: str = 'cpu',
 ) -> Tuple[Dict, ModelConfig, Optional[Dict]]:
-    """
-    Load checkpoint file and extract components.
-
-    Args:
-        checkpoint_path: Path to the checkpoint file
-        map_location: Device to load tensors to
-
-    Returns:
-        Tuple of (state_dict, config, metadata)
-
-    Raises:
-        FileNotFoundError: If checkpoint doesn't exist
-        ValueError: If checkpoint missing required 'config' field
-    """
+    """Load checkpoint, returning (state_dict, config, metadata)."""
     checkpoint_path = Path(checkpoint_path)
 
     if not checkpoint_path.exists():
@@ -61,39 +24,32 @@ def load_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
 
     if isinstance(checkpoint, dict):
-        # New format with model_state_dict key
         if 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
             config_dict = checkpoint.get('config')
             if config_dict is None:
                 raise ValueError(
-                    f"Checkpoint missing 'config' field. "
-                    f"Publication-standard checkpoints must include embedded config. "
-                    f"Use scripts/migrate_checkpoint.py to add config to legacy checkpoints."
+                    "Checkpoint missing required 'config' field. "
+                    "Checkpoints must include embedded ModelConfig for reproducibility."
                 )
             config = ModelConfig(**config_dict)
             metadata = checkpoint.get('metadata')
             return state_dict, config, metadata
 
-        # Alternative format with 'model' key
         if 'model' in checkpoint:
             state_dict = checkpoint['model']
             config_dict = checkpoint.get('config')
             if config_dict is None:
                 raise ValueError(
-                    f"Checkpoint missing 'config' field. "
-                    f"Publication-standard checkpoints must include embedded config. "
-                    f"Use scripts/migrate_checkpoint.py to add config to legacy checkpoints."
+                    "Checkpoint missing required 'config' field. "
+                    "Checkpoints must include embedded ModelConfig for reproducibility."
                 )
             config = ModelConfig(**config_dict)
             metadata = checkpoint.get('metadata')
             return state_dict, config, metadata
 
-    # Legacy format (plain state_dict) - not supported
     raise ValueError(
-        f"Legacy checkpoint format detected (plain state_dict without config). "
-        f"Publication-standard checkpoints must include embedded config. "
-        f"Use scripts/migrate_checkpoint.py to convert legacy checkpoints."
+        "Invalid checkpoint format. Expected dict with 'model_state_dict' or 'model' key and 'config' field."
     )
 
 
@@ -103,26 +59,7 @@ def load_model_from_checkpoint(
     dtype: torch.dtype = torch.bfloat16,
     strict: bool = True,
 ) -> Tuple[nn.Module, ModelConfig]:
-    """
-    Load model from checkpoint.
-
-    This is the primary entry point for loading models for evaluation.
-    Requires publication-standard checkpoint format with embedded config.
-
-    Args:
-        checkpoint_path: Path to the checkpoint file
-        device: Device to load model on ('cuda' or 'cpu')
-        dtype: Data type for model parameters
-        strict: Whether to require exact state_dict match
-
-    Returns:
-        Tuple of (model, config)
-
-    Example:
-        >>> model, config = load_model_from_checkpoint("outputs/best_model.pt")
-        >>> model.eval()
-        >>> outputs = model.generate(src_ids)
-    """
+    """Load model from checkpoint for evaluation."""
     state_dict, config, metadata = load_checkpoint(checkpoint_path, map_location='cpu')
 
     if metadata:
@@ -140,18 +77,35 @@ def load_model_from_checkpoint(
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
     if missing or unexpected:
+        def _summarize_keys(keys, limit=10):
+            if len(keys) <= limit:
+                return keys
+            prefixes = {}
+            for k in keys:
+                prefix = k.split('.')[0] if '.' in k else k
+                prefixes[prefix] = prefixes.get(prefix, 0) + 1
+            summary = [f"{p}: {c} keys" for p, c in sorted(prefixes.items())]
+            return summary[:5] + [f"...and {len(prefixes) - 5} more prefixes"] if len(prefixes) > 5 else summary
+
         if strict:
-            raise RuntimeError(
-                f"State dict mismatch - Missing: {len(missing)}, Unexpected: {len(unexpected)}. "
-                f"Missing keys: {missing[:5]}... "
-                f"Unexpected keys: {unexpected[:5]}... "
-                f"Use strict=False to load anyway."
+            msg = f"State dict mismatch:\n"
+            if missing:
+                msg += f"  Missing {len(missing)} keys: {_summarize_keys(missing)}\n"
+            if unexpected:
+                msg += f"  Unexpected {len(unexpected)} keys: {_summarize_keys(unexpected)}\n"
+            msg += (
+                "\nPossible causes:\n"
+                "  - Architecture config mismatch (d_model, n_layers, hybrid_positions)\n"
+                "  - Checkpoint from different model version\n"
+                "  - DDP/FSDP wrapper mismatch\n"
+                "\nUse strict=False to load anyway (may cause runtime errors)."
             )
+            raise RuntimeError(msg)
         else:
             if missing:
-                print(f"Warning: Missing keys in state_dict: {missing[:5]}...")
+                print(f"Warning: Missing {len(missing)} keys in state_dict: {_summarize_keys(missing)}")
             if unexpected:
-                print(f"Warning: Unexpected keys in state_dict: {unexpected[:5]}...")
+                print(f"Warning: Unexpected {len(unexpected)} keys in state_dict: {_summarize_keys(unexpected)}")
 
     model = model.to(device)
     model.eval()
@@ -169,29 +123,7 @@ def save_checkpoint(
     output_path: Union[str, Path] = "checkpoint.pt",
     world_size: int = 1,
 ) -> None:
-    """
-    Save checkpoint in publication-standard format.
-
-    Follows NeurIPS/ICML reproducibility guidelines by including:
-    - Model state dict
-    - ModelConfig for exact architecture reproduction (REQUIRED)
-    - Optimizer/scheduler state for training resumption
-    - Metadata for environment tracking
-
-    Args:
-        model: The model to save
-        optimizer: Optional optimizer for training resumption
-        scheduler: Optional scheduler for training resumption
-        global_step: Current training step
-        epoch: Current epoch
-        best_metric: Best validation metric achieved
-        output_path: Path to save checkpoint
-        world_size: Number of distributed processes
-
-    Raises:
-        ValueError: If model doesn't have config attribute
-    """
-    # Get config from model (REQUIRED)
+    """Save checkpoint with embedded config for reproducibility."""
     if hasattr(model, 'config'):
         config = asdict(model.config)
     elif hasattr(model, 'module') and hasattr(model.module, 'config'):
@@ -202,7 +134,6 @@ def save_checkpoint(
             "Publication-standard checkpoints require embedded config."
         )
 
-    # Get state dict (handle DDP)
     if hasattr(model, 'module'):
         state_dict = model.module.state_dict()
     else:

@@ -28,6 +28,7 @@ mqar:
 
   # Special tokens
   pad_token_id: 0
+  bos_token_id: 1
   eos_token_id: 2
   kv_sep_token_id: 3  # ':' separator between key and value
   query_token_id: 4   # QUERY marker

@@ -1,0 +1,77 @@
+# @package _global_
+#
+# Hybrid Placement Ablation Experiment (Figure 2)
+#
+# PURPOSE: Demonstrate that Layer 0 is critical ("Blind Start" fix).
+# Tests various hybrid_positions configurations on MQAR to show:
+# - Layer 0 is essential for creating contextualized queries
+# - Configurations without Layer 0 fail even with cross-attention elsewhere
+#
+# CONFIGURATIONS:
+#   A) hybrid_positions: []        -> Pure Mamba (no cross-attention)
+#   B) hybrid_positions: [0]       -> Blind Start Fix only
+#   C) hybrid_positions: [0, 2]    -> Minimal hybrid
+#   D) hybrid_positions: [0, 8, 16] -> Full spread pattern
+#   E) hybrid_positions: [8, 16]   -> No Blind Start (should fail)
+#
+# KEY HYPOTHESIS:
+# - Layer 0 cross-attention fixes "Blind Start" (decoder sees source at start)
+# - Without Layer 0, even with cross-attention at later layers, model fails
+# - This proves the mechanism: Mamba needs contextualized query BEFORE cross-attention
+#
+# EXPECTED RESULTS (at num_pairs=128, d_state=64):
+# - Pure Mamba []: ~0% accuracy (state overflow)
+# - Layer 0 only [0]: ~85-90% accuracy
+# - Minimal [0,2]: ~95% accuracy
+# - Full [0,8,16]: ~95% accuracy (no benefit over [0,2])
+# - No L0 [8,16]: ~0% accuracy (proves Blind Start hypothesis)
+#
+# USAGE:
+#   # Hydra multirun for all configurations
+#   python doc_nmt_mamba/scripts/train.py -m experiment=02_mechanism_ablation \
+#       'model.hybrid_positions=[],[0],[0,2],[0,8,16],[8,16]' \
+#       'seed=42,1337,2024'
+#
+#   # Single configuration
+#   python doc_nmt_mamba/scripts/train.py experiment=02_mechanism_ablation \
+#       model.hybrid_positions=[0,2]
+#
+defaults:
+  - override /data: mqar
+  - override /model: hybrid_small
+  - override /training: default
+
+experiment_name: "hybrid_placement_ablation"
+seed: 42
+
+project:
+  name: "mechanism-ablation"
+  output_dir: "outputs/02_mechanism"
+
+model:
+  vocab_size: 8192
+  d_model: 256
+  encoder_layers: 2
+  decoder_layers: 24  # Enough layers for spread patterns like [0,8,16]
+  d_state: 64  # Forces state capacity cliff
+  d_conv: 4
+  expand: 2
+  n_heads: 8
+  # Default: Minimal hybrid (override via CLI)
+  hybrid_positions: [0, 2]
+
+data:
+  dataset_name: "mqar"
+  num_samples: 10000
+  mode: "seq2seq"
+  # Use num_pairs > d_state to force state overflow
+  num_pairs: 128
+  num_queries: 16
+  seq_length: 512
+
+training:
+  max_steps: 5000
+  batch_size: 64
+  learning_rate: 1e-4
+  warmup_steps: 500
+  use_bf16: true

@@ -6,38 +6,45 @@
 # =============================================================================
 # 200M model uses ~8-12GB VRAM. With 80GB available, maximize batch size
 # to saturate H100 compute throughput. Single GPU = no DDP comm overhead.
-per_device_train_batch_size: 256  # Aggressive for single H100 (adjust per seq_len)
+batch_size: 256                   # Aggressive for single H100 (adjust per seq_len)
 gradient_accumulation_steps: 1    # No accumulation needed with large batch
-per_device_eval_batch_size: 512   # Larger for faster eval
-
-# Legacy alias (for backward compatibility)
-batch_size: 256
 
 # =============================================================================
 # Training Loop
 # =============================================================================
 max_steps: 100000
-max_grad_norm: 1.0
 
 # =============================================================================
 # Optimization
 # =============================================================================
-# Single GPU: Use standard LR (no DDP scaling needed)
-learning_rate: 3e-4  # Higher LR for larger batch size (256 vs 64)
+learning_rate: 3e-4
 weight_decay: 0.01
-betas: [0.9, 0.95]   # Slightly higher beta2 for stability with large batches
+betas: [0.9, 0.95]
 eps: 1e-8
+
+# Adaptive Gradient Clipping (AGC) - parameter-free alternative to fixed clip norm
+# AGC clips based on ||weight|| / ||grad|| ratio (Brock et al., 2021)
+use_agc: true
+agc_clip_factor: 0.01
+max_grad_norm: 1.0   # Fallback if use_agc: false
 
 # Fused optimizer - CRITICAL FOR H100
 # Runs entire optimizer step on GPU without CPU round-trips (~5-10% speedup)
 use_fused_optimizer: true
 
 # =============================================================================
-# Learning Rate Schedule
+# Learning Rate Schedule - ADAPTIVE WARMUP
 # =============================================================================
 scheduler_type: cosine
-warmup_steps: 4000
+warmup_ratio: 0.05     # Warmup as fraction of max_steps (5% default)
+min_warmup_steps: 100  # Floor for short training runs
 min_lr: 1e-6
+
+# =============================================================================
+# Label Smoothing - ADAPTIVE
+# =============================================================================
+# null = auto-scale based on vocab_size: 0.1 * log2(vocab) / log2(32768)
+label_smoothing: null
 
 # =============================================================================
 # Precision - H100 NATIVE BF16
@@ -51,41 +58,24 @@ use_bf16: true
 # =============================================================================
 # H100 + Inductor + cudagraphs = ~20-30% speedup
 use_compile: true
-torch_compile: true
 compile_mode: max-autotune  # Aggressive optimization (longer startup, faster runtime)
 
 # =============================================================================
 # H100 Hardware Optimizations
 # =============================================================================
 tf32_matmul: true           # ~3x speedup on FP32 math
-matmul_precision: high      # BF16 accumulation for Tensor Cores
 cudnn_benchmark: true       # Autotune convolutions
-channels_last: true         # Memory format optimization
-
-# =============================================================================
-# DataLoader - LEVERAGING 26 vCPUs + 221GB RAM
-# =============================================================================
-# Single GPU: Use 20 workers, leave 6 cores for GPU/OS/overhead
-dataloader_num_workers: 20
-dataloader_pin_memory: true
-dataloader_persistent_workers: true  # Keep workers alive between epochs
-dataloader_prefetch_factor: 8        # Aggressive prefetching (221GB RAM available)
-dataloader_drop_last: true           # Consistent batch sizes
 
 # =============================================================================
 # Memory Optimization
 # =============================================================================
 gradient_checkpointing: true  # Enable for 8K sequences
-empty_cache_steps: 1000       # Periodic cache clearing
 
 # =============================================================================
 # Distributed Training (Single H100 - DDP disabled by default)
 # =============================================================================
 distributed_strategy: none     # Single GPU - no DDP overhead
-find_unused_parameters: false  # Faster if all params used
 static_graph: true             # Enable for torch.compile compatibility
-gradient_as_bucket_view: true  # Memory optimization
-bucket_cap_mb: 512             # Large buckets (used if DDP enabled)
 
 # FSDP settings (if using FSDP for larger models)
 fsdp_sharding: full_shard
@@ -103,14 +93,7 @@ output_dir: outputs
 # =============================================================================
 # Regularization
 # =============================================================================
-label_smoothing: 0.1
 dropout: 0.1
-
-# =============================================================================
-# Reproducibility
-# =============================================================================
-seed: 42
-deterministic: false  # True slows down training by 10-20%
 
 # =============================================================================
 # Resume
