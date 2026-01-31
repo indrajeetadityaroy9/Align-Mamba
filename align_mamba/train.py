@@ -1,18 +1,18 @@
 """Training loop for Align-Mamba."""
 
-import os
 import math
-import time
+import os
 import random
 import shutil
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
 
 from align_mamba.config import Config
 from align_mamba.model import HybridMambaEncoderDecoder, get_unwrapped_model
@@ -50,10 +50,10 @@ class CosineScheduler:
     def step(self):
         self.step_count += 1
         if self.step_count < self.warmup:
-            scale = self.step_count / self.warmup
+            scale = self.step_count / max(1, self.warmup)
         else:
-            progress = (self.step_count - self.warmup) / (self.max_steps - self.warmup)
-            scale = 0.5 * (1 + math.cos(math.pi * progress))
+            progress = (self.step_count - self.warmup) / max(1, self.max_steps - self.warmup)
+            scale = 0.5 * (1 + math.cos(math.pi * min(1.0, progress)))
         for g, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
             g['lr'] = base_lr * scale
 
@@ -80,19 +80,20 @@ class Trainer:
         self.model = DDP(model, device_ids=[self.device.index], gradient_as_bucket_view=True)
 
         no_decay = ["bias", "norm"]
+        params_decay = [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)]
+        params_no_decay = [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)]
         groups = [
-            {"params": [p], "lr": config.learning_rate,
-             "weight_decay": 0.0 if any(nd in n for nd in no_decay) else 0.01 / p.norm().item()}
-            for n, p in model.named_parameters()
+            {"params": params_decay, "weight_decay": config.weight_decay},
+            {"params": params_no_decay, "weight_decay": 0.0},
         ]
-        self.optimizer = torch.optim.AdamW(groups, betas=(0.9, 0.95), eps=1e-8, fused=True)
-        self.scheduler = CosineScheduler(self.optimizer, 100, config.max_steps)
-        self.smoothing = config.label_smoothing
+        self.optimizer = torch.optim.AdamW(groups, lr=config.learning_rate,
+                                           betas=(0.9, 0.95), eps=1e-8, fused=True)
+        self.scheduler = CosineScheduler(self.optimizer, config.warmup_steps, config.max_steps)
 
         steps_per_epoch = config.num_samples // config.batch_size
-        self.log_steps = steps_per_epoch // 100
-        self.eval_steps = steps_per_epoch // 10
-        self.save_steps = steps_per_epoch // 2
+        self.log_steps = max(1, steps_per_epoch // 100)
+        self.eval_steps = max(1, steps_per_epoch // 10)
+        self.save_steps = max(1, steps_per_epoch // 2)
 
         self.global_step = 0
         self.epoch = 0
@@ -119,17 +120,13 @@ class Trainer:
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 logits = self.model(batch["src_ids"], batch["tgt_ids"][:, :-1])
-                loss = fused_cross_entropy_loss(logits, batch["labels"], self.smoothing)
+                loss = fused_cross_entropy_loss(logits, batch["labels"], self.config.label_smoothing)
 
             loss.backward()
             loss_accum += loss.detach()
 
-            for p in self.model.parameters():
-                pn = p.data.norm(p=2).clamp(min=1e-3)
-                gn = p.grad.data.norm(p=2)
-                clip = pn * p.data.std().item() / (p.shape[-1] ** 0.5 + 1e-4) if p.dim() > 1 else pn * 0.01
-                if gn > clip:
-                    p.grad.data.mul_(clip / gn)
+            if self.config.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
 
             self.optimizer.step()
             self.scheduler.step()
@@ -173,7 +170,7 @@ class Trainer:
                 correct += ((preds == labels) & mask).sum().item()
                 total += mask.sum().item()
 
-        acc = correct / total
+        acc = correct / total if total > 0 else 0
         if self.is_main:
             print(f"eval step={self.global_step} acc={acc:.4f}")
 
@@ -211,17 +208,17 @@ class Trainer:
 
 
 def main():
-    config = Config.from_args()
+    config = Config()
     dist_info = setup_distributed()
 
-    model = HybridMambaEncoderDecoder.from_config(config, str(dist_info["device"]), torch.bfloat16)
+    model = HybridMambaEncoderDecoder(config, str(dist_info["device"]), torch.bfloat16)
 
     from align_mamba.data import create_dataloaders
     train_loader, val_loader = create_dataloaders(config, dist_info["world_size"], dist_info["rank"])
 
     if dist_info["is_main"]:
         params = sum(p.numel() for p in model.parameters())
-        print(f"params={params / 1e6:.1f}M cross_attn={sorted(model.decoder.cross_attn_positions)}")
+        print(f"Polar-Mem-Mamba | params={params/1e6:.1f}M | d_state={config.d_state} | num_pairs={config.num_pairs}")
 
     Trainer(model, train_loader, config, dist_info, val_loader).train()
 

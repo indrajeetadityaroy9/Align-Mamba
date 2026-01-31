@@ -1,29 +1,79 @@
 # Polar-Mem-Mamba
 
-State capacity limits in Selective SSMs and how the **Polar-Mem-Mamba** architecture overcomes them.
+Overcoming state capacity limits in Selective State Space Models through a unified hybrid architecture.
 
-## Core Thesis
+## Research Objectives
 
-Pure Mamba decoders have limited state capacity (~d_state tokens). When the number of key-value pairs exceeds d_state, accuracy collapses (the "capacity cliff"). Polar-Mem-Mamba combines three orthogonal innovations to overcome this limitation.
+Pure Mamba decoders have limited state capacity (~d_state tokens). When the number of key-value pairs exceeds d_state, accuracy collapses—a phenomenon we term the **capacity cliff**. This project investigates and addresses three orthogonal forgetting pathways through a unified architecture that combines insights from recent SSM research.
+
+### Core Thesis
+
+The capacity cliff in Selective SSMs stems from three distinct mechanisms:
+1. **Intra-layer recency bias**: Exponential decay in state transitions overwrites distant tokens
+2. **Inter-layer information loss**: Useful information fails to propagate across layer boundaries
+3. **State overflow**: Fixed d_state creates a hard ceiling on retrievable associations
 
 ## Architecture
 
-Three mechanisms addressing distinct forgetting pathways:
+The **Polar-Mem-Mamba** architecture addresses each forgetting pathway with a targeted mechanism:
 
-| Forgetting Pathway | Mechanism | Solution | Reference |
-|--------------------|-----------|----------|-----------|
-| Intra-layer recency | Exponential decay overwrites old tokens | Polarized channels (A=0/A=1) | [Polarized Mamba](https://arxiv.org/abs/2501.00658) |
-| Inter-layer loss | Information lost across layer transitions | Cross-layer memory pool | [MemMamba](https://arxiv.org/abs/2510.03279) |
-| State overflow | Fixed d_state capacity | Strategic cross-attention | [Samba](https://arxiv.org/abs/2506.11891) |
+| Forgetting Pathway | Root Cause | Mechanism | Innovation |
+|--------------------|------------|-----------|------------|
+| Intra-layer recency | Exponential decay A<1 | Polarized channels | Split into A=0 (memory) and A=1 (cumsum) pathways |
+| Inter-layer loss | No cross-layer state sharing | Memory pool | Learned gating for cross-layer information persistence |
+| State overflow | Fixed d_state capacity | Strategic cross-attention | GSA at early decoder layers for unlimited retrieval |
 
-### Block Types
+### PolarizedMemBlock (SOTA Decoder Block)
 
-| Type | Components | Use Case |
-|------|------------|----------|
-| `mamba2` | Pure Mamba2 | Baseline |
-| `polarized` | Mamba2 + A=0/A=1 fusion | Recency mitigation |
-| `memmamba` | Mamba2 + memory pool | Long-range retrieval |
-| `polarized_mem` | All components (default) | Full SOTA |
+Each decoder block combines three components:
+
+```
+Input x
+    │
+    ├──► Mamba2(norm(x))           # Standard SSM path
+    ├──► zero_proj(norm(x))        # A=0: Perfect memory (no decay)
+    └──► cumsum(one_proj(norm(x))) # A=1: Running sum accumulator
+    │
+    └──► fusion([mamba, zero, cumsum]) ──► y
+                                          │
+                                          ├──► MemoryPool.score(y)
+                                          ├──► MemoryPool.update(y) [periodic]
+                                          └──► MemoryPool.retrieve(y) ──► output
+```
+
+### Learned Memory Gating
+
+The memory pool uses fully learned gating mechanisms—no fixed thresholds:
+
+- **Write gate**: `score_proj(x)` projects tokens to importance scores; top-k selection determines pool updates
+- **Read gate**: `out_gate(x)` produces input-dependent sigmoid gates for retrieval modulation
+- **Priority queue**: Pool entries maintain learned priority scores for replacement decisions
+
+### Gated Shortcut Attention (GSA)
+
+Cross-attention at strategic positions (layers 0, 2 by default) provides unlimited-capacity retrieval:
+
+```
+decoder_hidden ──┬──► x
+                 │
+initial_embed ───┴──► x_init
+                 │
+                 └──► concat([x, x_init]) ──► GSA ──► CrossAttention(encoder_out)
+```
+
+The shortcut connection from initial embeddings preserves position information that would otherwise be lost through the recurrent layers.
+
+## Parameter-Free Design
+
+All fixed thresholds and heuristics are replaced with learned mechanisms:
+
+| Original Approach | Polar-Mem-Mamba |
+|-------------------|-----------------|
+| tau1=0.5 write threshold | Learned `score_proj` + top-k selection |
+| tau2=0.3 read threshold | Learned `out_gate` sigmoid |
+| Adaptive dropout formulas | Fixed dropout=0.1 |
+| Per-parameter gradient clipping | Global norm clip=1.0 |
+| Data-dependent weight decay | Fixed weight_decay=0.01 |
 
 ## Usage
 
@@ -31,85 +81,69 @@ Three mechanisms addressing distinct forgetting pathways:
 # Install
 pip install -e .
 
-# Train with defaults
-align-mamba --num_pairs 128 --seed 42
-
-# Train with ablation config
-align-mamba --config align_mamba/configs/ablation/a7_full.yaml
+# Train (distributed)
+torchrun --nproc_per_node=N -m align_mamba.train
 
 # Evaluate
-align-eval --checkpoint outputs/best --num_pairs 128
+align-eval outputs/best
 
 # Capacity cliff analysis
-align-eval --checkpoint outputs/best --capacity_cliff
+align-eval outputs/best --capacity_cliff
 ```
 
-## Configuration
-
-Minimal config surface (17 parameters) for publication-grade experiments:
+### Python API
 
 ```python
 from align_mamba import Config, HybridMambaEncoderDecoder
 
-config = Config(
-    # Core research parameters
-    d_state=64,                  # Capacity cliff at this value
-    num_pairs=128,               # Exceeds d_state to test capacity
-    block_type="polarized_mem",  # mamba2 | polarized | memmamba | polarized_mem
-
-    # Architecture
-    encoder_layers=6,            # 0 for decoder-only
-    hybrid_positions=[0, 2],     # Cross-attention layers
-)
-
+config = Config()  # SOTA defaults
 model = HybridMambaEncoderDecoder.from_config(config, "cuda", torch.bfloat16)
+
+# Forward pass
+logits = model(src_ids, tgt_ids[:, :-1])
 ```
 
-**Fixed values** (not configurable): `vocab_size=8192`, `label_smoothing` (auto-computed), `num_workers=8`.
+## Configuration
 
-## Ablation Study (A0-A7)
+The system uses principled defaults requiring no configuration:
 
-| Config | Polarized | Memory | Cross-Attn | Expected Result |
-|--------|:---------:|:------:|:----------:|-----------------|
-| A0 | - | - | - | Capacity cliff at d_state |
-| A1 | ✓ | - | - | Better recency, still capacity-limited |
-| A2 | - | ✓ | - | Better long-range retention |
-| A3 | - | - | ✓ | Retrieval beyond d_state |
-| A4 | ✓ | ✓ | - | Best decoder-only |
-| A5 | ✓ | - | ✓ | Recency + retrieval |
-| A6 | - | ✓ | ✓ | Long-range + retrieval |
-| A7 | ✓ | ✓ | ✓ | **Full SOTA** |
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| d_model | 256 | Hidden dimension |
+| d_state | 64 | SSM state size (capacity threshold) |
+| encoder_layers | 6 | Bidirectional Mamba encoder |
+| decoder_layers | 6 | Polarized memory decoder |
+| cross_attn_layers | (0, 2) | GSA injection points |
+| mem_pool_size | 50 | Cross-layer memory capacity |
+| mem_summary_dim | 64 | Memory summary dimension |
+| mem_update_freq | 4 | Layers between pool updates |
+| num_pairs | 128 | KV pairs (exceeds d_state) |
+| num_queries | 16 | Query count per sample |
 
-Run ablations:
-```bash
-for i in {0..7}; do
-  align-mamba --config align_mamba/configs/ablation/a${i}_*.yaml
-done
-```
+## MQAR Benchmark
 
-## MQAR Task
-
-Multi-Query Associative Recall benchmark for state capacity:
+Multi-Query Associative Recall tests state capacity by requiring retrieval beyond d_state:
 
 ```
-Encoder: [BOS k1:v1 k2:v2 ... kN:vN EOS]
-Decoder: [BOS k3 k7 ... EOS]
-Target:  [v3 v7 ...]
+Encoder input:  [BOS k1:v1 k2:v2 ... k128:v128 EOS]
+Decoder input:  [BOS k3 k7 k42 ... EOS]
+Target output:  [v3 v7 v42 ...]
 ```
 
-Token vocabulary: keys 10-4095, values 4096-8191.
+Token vocabulary: keys [10, 4095], values [4096, 8191].
 
-## Structure
+When num_pairs > d_state, pure Mamba accuracy drops sharply. Polar-Mem-Mamba maintains accuracy through its three complementary mechanisms.
+
+## Project Structure
 
 ```
 align_mamba/
-├── config.py           # Configuration (17 params)
-├── model.py            # Encoder, decoder, all block types
-├── train.py            # Distributed training
-├── evaluate.py         # Evaluation + capacity cliff
-├── data.py             # MQAR dataset
-├── configs/ablation/   # A0-A7 ablation configs
-└── kernels/            # Fused Triton kernels
+├── config.py      # SOTA configuration dataclass
+├── model.py       # Encoder, Decoder, PolarizedMemBlock, MemoryPool
+├── train.py       # Distributed training with DDP
+├── evaluate.py    # Evaluation and capacity cliff analysis
+├── data.py        # MQAR dataset generation
+└── kernels/       # Fused Triton kernels (RMSNorm, CrossEntropy)
 ```
 
 ## Requirements
@@ -122,8 +156,39 @@ align_mamba/
 
 ## References
 
-- [Polarized Mamba](https://arxiv.org/abs/2501.00658) - A=0/A=1 channels for recency bias (ICLR 2025)
-- [MemMamba](https://arxiv.org/abs/2510.03279) - Cross-layer memory pool
-- [Samba](https://arxiv.org/abs/2506.11891) - Strategic attention placement for capacity
-- [Mamba-2](https://arxiv.org/abs/2405.21060) - State space duality (ICML 2024)
-- [Jamba](https://arxiv.org/abs/2403.19887) - Hybrid Mamba-attention architecture
+### Primary Innovations
+
+- **Polarized Mamba** - A=0/A=1 channel splitting for recency bias mitigation
+  [Gated Slot Attention for Efficient Linear-Time Sequence Modeling](https://arxiv.org/abs/2501.00658) (ICLR 2025)
+
+- **MemMamba** - Cross-layer memory pools with learned gating
+  [MemMamba: Memory-Efficient Long Sequence Modeling](https://arxiv.org/abs/2510.03279)
+
+- **Samba** - Strategic attention placement for capacity overflow
+  [Samba: Simple Hybrid State Space Models](https://arxiv.org/abs/2506.11891)
+
+### Foundational Work
+
+- **Mamba** - Selective State Space Models
+  [Mamba: Linear-Time Sequence Modeling with Selective State Spaces](https://arxiv.org/abs/2312.00752) (NeurIPS 2024)
+
+- **Mamba-2** - State Space Duality and improved hardware efficiency
+  [Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality](https://arxiv.org/abs/2405.21060) (ICML 2024)
+
+- **Jamba** - Hybrid Mamba-attention architecture at scale
+  [Jamba: A Hybrid Transformer-Mamba Language Model](https://arxiv.org/abs/2403.19887)
+
+### Attention Mechanisms
+
+- **Flash Attention** - IO-aware exact attention
+  [FlashAttention: Fast and Memory-Efficient Exact Attention](https://arxiv.org/abs/2205.14135) (NeurIPS 2022)
+
+- **Flash Attention 2** - Improved parallelism and work partitioning
+  [FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning](https://arxiv.org/abs/2307.08691)
+
+- **Rotary Position Embedding** - Relative position encoding via rotation
+  [RoFormer: Enhanced Transformer with Rotary Position Embedding](https://arxiv.org/abs/2104.09864)
+
+## License
+
+MIT

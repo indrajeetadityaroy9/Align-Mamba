@@ -1,7 +1,7 @@
 """Polar-Mem-Mamba: Unified Hybrid Architecture."""
 
 import math
-from typing import List, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,7 @@ from align_mamba.kernels.rmsnorm import fused_rmsnorm
 class RMSNorm(nn.Module):
     def __init__(self, d_model: int, device=None, dtype=None):
         super().__init__()
-        self.eps = 1e-4
+        self.eps = 1e-5
         self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -58,17 +58,19 @@ class RotaryEmbedding(nn.Module):
 
 
 class CrossAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float, device=None, dtype=None, **kwargs):
+    """Cross-attention with separate Q and KV dimensions for GSA."""
+
+    def __init__(self, d_q: int, d_kv: int, n_heads: int, dropout: float, device=None, dtype=None):
         super().__init__()
         self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
+        self.head_dim = d_q // n_heads
         self.scale = math.sqrt(self.head_dim)
         self.dropout = dropout
 
-        self.norm = RMSNorm(d_model, device, dtype)
-        self.q_proj = nn.Linear(d_model, d_model, bias=False, device=device, dtype=dtype)
-        self.kv_proj = nn.Linear(d_model, d_model * 2, bias=False, device=device, dtype=dtype)
-        self.out_proj = nn.Linear(d_model, d_model, bias=False, device=device, dtype=dtype)
+        self.norm = RMSNorm(d_q, device, dtype)
+        self.q_proj = nn.Linear(d_q, d_q, bias=False, device=device, dtype=dtype)
+        self.kv_proj = nn.Linear(d_kv, d_q * 2, bias=False, device=device, dtype=dtype)
+        self.out_proj = nn.Linear(d_q, d_q, bias=False, device=device, dtype=dtype)
         self.rope = RotaryEmbedding(self.head_dim, device)
 
     def forward(self, x: torch.Tensor, encoder_out: torch.Tensor) -> torch.Tensor:
@@ -90,176 +92,109 @@ class CrossAttention(nn.Module):
         return residual + self.out_proj(out.view(B, T_dec, -1))
 
 
-class Mamba2Block(nn.Module):
-    def __init__(self, d_model: int, d_state: int, device=None, dtype=None, **kwargs):
-        super().__init__()
-        self.norm = RMSNorm(d_model, device, dtype)
-        self.mamba = Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2,
-                           headdim=64, device=device, dtype=dtype)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.mamba(self.norm(x).contiguous())
-
-
-class PolarizedMamba2Block(nn.Module):
-    def __init__(self, d_model: int, d_state: int, device=None, dtype=None, **kwargs):
-        super().__init__()
-        d_inner = d_model * 2
-        self.norm = RMSNorm(d_model, device, dtype)
-        self.mamba = Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2,
-                           headdim=64, device=device, dtype=dtype)
-        self.zero_proj = nn.Linear(d_model, d_inner, bias=False, device=device, dtype=dtype)
-        self.one_proj = nn.Linear(d_model, d_inner, bias=False, device=device, dtype=dtype)
-        self.fusion = nn.Linear(d_inner * 3, d_model, bias=False, device=device, dtype=dtype)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.norm(x).contiguous()
-        return x + self.fusion(torch.cat([self.mamba(h), self.zero_proj(h),
-                                          torch.cumsum(self.one_proj(h), dim=1)], dim=-1))
-
-
 class MemoryPool(nn.Module):
-    def __init__(self, d_model: int, pool_size: int, summary_dim: int,
-                 tau1: float, tau2: float, device=None, dtype=None):
+    """Differentiable memory pool with learned gating."""
+
+    def __init__(self, d_model: int, pool_size: int, summary_dim: int, device=None, dtype=None):
         super().__init__()
         self.pool_size = pool_size
         self.summary_dim = summary_dim
-        self.tau1 = tau1
-        self.tau2 = tau2
+        self.scale = summary_dim ** -0.5
 
-        hidden = d_model // 4
-        self.score_w1 = nn.Linear(d_model, hidden, bias=False, device=device, dtype=dtype)
-        self.score_w2 = nn.Linear(hidden, 1, bias=False, device=device, dtype=dtype)
+        self.score_proj = nn.Linear(d_model, 1, bias=True, device=device, dtype=dtype)
         self.summarizer = nn.Linear(d_model, summary_dim, bias=False, device=device, dtype=dtype)
         self.q_proj = nn.Linear(d_model, summary_dim, bias=False, device=device, dtype=dtype)
         self.k_proj = nn.Linear(summary_dim, summary_dim, bias=False, device=device, dtype=dtype)
         self.v_proj = nn.Linear(summary_dim, d_model, bias=False, device=device, dtype=dtype)
-        self.gate = nn.Sequential(
-            nn.Linear(d_model * 2, d_model, bias=False, device=device, dtype=dtype),
-            nn.Sigmoid(),
-        )
+        self.out_proj = nn.Linear(d_model * 2, d_model, bias=False, device=device, dtype=dtype)
+        self.out_gate = nn.Linear(d_model, d_model, bias=True, device=device, dtype=dtype)
 
     def score(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(self.score_w2(F.relu(self.score_w1(x)))).squeeze(-1)
+        return self.score_proj(x).squeeze(-1)
 
-    def retrieve(self, x: torch.Tensor, pool: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def retrieve(self, x: torch.Tensor, pool: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
         B, T, _ = x.shape
-        q, k, v = self.q_proj(x), self.k_proj(pool), self.v_proj(pool)
-        attn = torch.bmm(q, k.transpose(1, 2)) / (self.summary_dim ** 0.5)
-        attn = attn.masked_fill(~mask.unsqueeze(1).expand(-1, T, -1), float('-inf'))
-        attn = torch.nan_to_num(F.softmax(attn, dim=-1), nan=0.0)
+        q = self.q_proj(x)
+        k = self.k_proj(pool)
+        v = self.v_proj(pool)
+
+        attn = torch.bmm(q, k.transpose(1, 2)) * self.scale
+        attn = attn.masked_fill(~pool_mask.unsqueeze(1).expand(-1, T, -1), float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0)
         return torch.bmm(attn, v)
 
-    def update(self, tokens: torch.Tensor, scores: torch.Tensor, pool: torch.Tensor,
-               priorities: torch.Tensor, counts: torch.Tensor):
-        B, T, D = tokens.shape
-        mask = scores > self.tau1
-        sorted_scores, indices = torch.sort(scores, dim=1, descending=True)
-        sorted_tokens = torch.gather(tokens, 1, indices.unsqueeze(-1).expand(-1, -1, D))
-        sorted_mask = torch.gather(mask, 1, indices)
-        summaries = self.summarizer(sorted_tokens.view(B * T, D)).view(B, T, -1)
+    def update(self, tokens: torch.Tensor, scores: torch.Tensor,
+               pool: torch.Tensor, priorities: torch.Tensor, counts: torch.Tensor):
+        B, T, _ = tokens.shape
+        summaries = self.summarizer(tokens)
 
-        for slot in range(min(T, self.pool_size)):
-            has_imp = sorted_mask[:, slot]
-            imp = sorted_scores[:, slot]
-            summ = summaries[:, slot]
+        k = min(self.pool_size, T)
+        top_scores, top_idx = torch.topk(scores, k, dim=1)
+        top_summaries = torch.gather(summaries, 1, top_idx.unsqueeze(-1).expand(-1, -1, self.summary_dim))
 
-            add = has_imp & (counts < self.pool_size)
-            for b in range(B):
-                if add[b]:
-                    pool[b, counts[b]] = summ[b]
-                    priorities[b, counts[b]] = imp[b]
-                    counts[b] += 1
+        for b in range(B):
+            n_new = min(k, self.pool_size - counts[b].item())
+            if n_new > 0:
+                pool[b, counts[b]:counts[b]+n_new] = top_summaries[b, :n_new]
+                priorities[b, counts[b]:counts[b]+n_new] = top_scores[b, :n_new]
+                counts[b] += n_new
 
-            replace = has_imp & (counts >= self.pool_size)
-            min_p, min_idx = priorities.min(dim=1)
-            should = replace & (imp > min_p)
-            for b in range(B):
-                if should[b]:
-                    pool[b, min_idx[b]] = summ[b]
-                    priorities[b, min_idx[b]] = imp[b]
+            if counts[b] >= self.pool_size and k > n_new:
+                for i in range(n_new, k):
+                    min_idx = priorities[b].argmin()
+                    if top_scores[b, i] > priorities[b, min_idx]:
+                        pool[b, min_idx] = top_summaries[b, i]
+                        priorities[b, min_idx] = top_scores[b, i]
 
         return pool, priorities, counts
 
+    def forward(self, x: torch.Tensor, pool: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
+        retrieved = self.retrieve(x, pool, pool_mask)
+        combined = torch.cat([x, retrieved], dim=-1)
+        gate = torch.sigmoid(self.out_gate(x))
+        return x + gate * self.out_proj(combined)
 
-class MemMambaBlock(nn.Module):
+
+class PolarizedMemBlock(nn.Module):
+    """SOTA block: Polarized Mamba2 + Differentiable Memory Pool."""
+
     def __init__(self, d_model: int, d_state: int, pool_size: int, summary_dim: int,
-                 tau1: float, tau2: float, layer_idx: int, cross_layer_frequency: int,
-                 device=None, dtype=None, **kwargs):
+                 layer_idx: int, update_freq: int, device=None, dtype=None):
         super().__init__()
         self.layer_idx = layer_idx
-        self.freq = cross_layer_frequency
-        self.tau2 = tau2
+        self.update_freq = update_freq
         self.pool_size = pool_size
         self.summary_dim = summary_dim
 
-        self.norm = RMSNorm(d_model, device, dtype)
-        self.mamba = Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2,
-                           headdim=64, device=device, dtype=dtype)
-        self.memory = MemoryPool(d_model, pool_size, summary_dim, tau1, tau2, device, dtype)
-
-    def forward(self, x: torch.Tensor, pool: torch.Tensor, priorities: torch.Tensor, counts: torch.Tensor):
-        B = x.size(0)
-        y = x + self.mamba(self.norm(x).contiguous())
-        scores = self.memory.score(y)
-
-        if self.layer_idx % self.freq == 0:
-            pool, priorities, counts = self.memory.update(y, scores, pool, priorities, counts)
-
-        mask = torch.arange(self.pool_size, device=x.device).unsqueeze(0) < counts.unsqueeze(1)
-        retrieved = self.memory.retrieve(y, pool, mask)
-        gate = self.memory.gate(torch.cat([y, retrieved], dim=-1))
-        retrieve_mask = ((scores.mean(dim=1) > self.tau2) & (counts > 0)).view(B, 1, 1)
-        y = y + gate * retrieved * retrieve_mask
-
-        return y, pool, priorities, counts
-
-
-class PolarizedMemMambaBlock(nn.Module):
-    def __init__(self, d_model: int, d_state: int, pool_size: int, summary_dim: int,
-                 tau1: float, tau2: float, layer_idx: int, cross_layer_frequency: int,
-                 device=None, dtype=None, **kwargs):
-        super().__init__()
-        self.layer_idx = layer_idx
-        self.freq = cross_layer_frequency
-        self.tau2 = tau2
-        self.pool_size = pool_size
-        self.summary_dim = summary_dim
         d_inner = d_model * 2
-
         self.norm = RMSNorm(d_model, device, dtype)
         self.mamba = Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2,
                            headdim=64, device=device, dtype=dtype)
         self.zero_proj = nn.Linear(d_model, d_inner, bias=False, device=device, dtype=dtype)
         self.one_proj = nn.Linear(d_model, d_inner, bias=False, device=device, dtype=dtype)
         self.fusion = nn.Linear(d_inner * 3, d_model, bias=False, device=device, dtype=dtype)
-        self.memory = MemoryPool(d_model, pool_size, summary_dim, tau1, tau2, device, dtype)
+        self.memory = MemoryPool(d_model, pool_size, summary_dim, device, dtype)
 
-    def forward(self, x: torch.Tensor, pool: torch.Tensor, priorities: torch.Tensor, counts: torch.Tensor):
+    def forward(self, x: torch.Tensor, pool: torch.Tensor,
+                priorities: torch.Tensor, counts: torch.Tensor):
         B = x.size(0)
-        h = self.norm(x).contiguous()
-        y = x + self.fusion(torch.cat([self.mamba(h), self.zero_proj(h),
-                                        torch.cumsum(self.one_proj(h), dim=1)], dim=-1))
-        scores = self.memory.score(y)
 
-        if self.layer_idx % self.freq == 0:
+        h = self.norm(x).contiguous()
+        y = x + self.fusion(torch.cat([
+            self.mamba(h),
+            self.zero_proj(h),
+            torch.cumsum(self.one_proj(h), dim=1)
+        ], dim=-1))
+
+        scores = self.memory.score(y)
+        if self.layer_idx % self.update_freq == 0:
             pool, priorities, counts = self.memory.update(y, scores, pool, priorities, counts)
 
-        mask = torch.arange(self.pool_size, device=x.device).unsqueeze(0) < counts.unsqueeze(1)
-        retrieved = self.memory.retrieve(y, pool, mask)
-        gate = self.memory.gate(torch.cat([y, retrieved], dim=-1))
-        retrieve_mask = ((scores.mean(dim=1) > self.tau2) & (counts > 0)).view(B, 1, 1)
-        y = y + gate * retrieved * retrieve_mask
+        pool_mask = torch.arange(self.pool_size, device=x.device).unsqueeze(0) < counts.unsqueeze(1)
+        y = self.memory(y, pool, pool_mask)
 
         return y, pool, priorities, counts
-
-
-BLOCKS = {
-    "mamba2": Mamba2Block,
-    "polarized": PolarizedMamba2Block,
-    "memmamba": MemMambaBlock,
-    "polarized_mem": PolarizedMemMambaBlock,
-}
 
 
 class BiMambaBlock(nn.Module):
@@ -270,11 +205,13 @@ class BiMambaBlock(nn.Module):
                          headdim=64, device=device, dtype=dtype)
         self.bwd = Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2,
                          headdim=64, device=device, dtype=dtype)
-        self.out_proj = nn.Linear(d_model * 2, d_model, device=device, dtype=dtype)
+        self.out_proj = nn.Linear(d_model * 2, d_model, bias=False, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.norm(x)
-        return x + self.out_proj(torch.cat([self.fwd(h), torch.flip(self.bwd(torch.flip(h, [1])), [1])], dim=-1))
+        h = self.norm(x).contiguous()
+        fwd_out = self.fwd(h)
+        bwd_out = torch.flip(self.bwd(torch.flip(h, [1])), [1])
+        return x + self.out_proj(torch.cat([fwd_out, bwd_out], dim=-1))
 
 
 class BiAttention(nn.Module):
@@ -315,33 +252,30 @@ class Encoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.embed(x)
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             x = layer(x)
         return self.norm(x)
 
 
 class Decoder(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, n_layers: int, d_state: int,
-                 n_heads: int, num_pairs: int, hybrid_positions: List[int],
-                 dropout: float, block_type: str, pool_size: int, summary_dim: int,
-                 tau1: float, tau2: float, cross_freq: int, device=None, dtype=None):
+                 n_heads: int, cross_attn_layers: tuple, dropout: float,
+                 pool_size: int, summary_dim: int, update_freq: int,
+                 device=None, dtype=None):
         super().__init__()
         self.pool_size = pool_size
         self.summary_dim = summary_dim
         self.embed = Embedding(vocab_size, d_model, dropout, device, dtype)
 
-        self.cross_attn_positions = set(hybrid_positions)
-        block_cls = BLOCKS[block_type]
-        self.has_memory = block_type in ("memmamba", "polarized_mem")
-
+        self.cross_attn_positions = set(cross_attn_layers)
         self.layers = nn.ModuleList([
-            block_cls(d_model=d_model, d_state=d_state, pool_size=pool_size,
-                      summary_dim=summary_dim, tau1=tau1, tau2=tau2,
-                      layer_idx=i, cross_layer_frequency=cross_freq, device=device, dtype=dtype)
+            PolarizedMemBlock(d_model, d_state, pool_size, summary_dim,
+                             i, update_freq, device, dtype)
             for i in range(n_layers)
         ])
 
-        self.cross_attn = CrossAttention(d_model * 2, n_heads, dropout, device, dtype)
+        # CrossAttention: Q from GSA (d_model*2), KV from encoder (d_model)
+        self.cross_attn = CrossAttention(d_model * 2, d_model, n_heads, dropout, device, dtype)
         self.cross_projs = nn.ModuleDict({
             str(i): nn.Linear(d_model * 2, d_model, bias=False, device=device, dtype=dtype)
             for i in self.cross_attn_positions
@@ -360,10 +294,7 @@ class Decoder(nn.Module):
         counts = torch.zeros(B, device=x.device, dtype=torch.long)
 
         for i, layer in enumerate(self.layers):
-            if self.has_memory:
-                x, pool, priorities, counts = layer(x, pool, priorities, counts)
-            else:
-                x = layer(x)
+            x, pool, priorities, counts = layer(x, pool, priorities, counts)
 
             if i in self.cross_attn_positions:
                 gsa = torch.cat([x, x_init], dim=-1)
@@ -373,24 +304,21 @@ class Decoder(nn.Module):
 
 
 class HybridMambaEncoderDecoder(nn.Module):
-    def __init__(self, config: Config, device=None, dtype=None):
+    def __init__(self, config: Config = None, device=None, dtype=None):
         super().__init__()
-        self.config = config
+        self.config = config or Config()
 
-        params = config.vocab_size * config.d_model * 2 + \
-                 (config.encoder_layers + config.decoder_layers) * config.d_model ** 2 * 4
-        dropout = 0.5 * (1 - math.exp(-params / config.num_samples * 100))
-        dropout = max(0.0, min(0.5, dropout))
+        self.encoder = Encoder(
+            self.config.vocab_size, self.config.d_model, self.config.encoder_layers,
+            self.config.d_state, self.config.n_heads, self.config.dropout, device, dtype
+        )
 
-        self.encoder = Encoder(config.vocab_size, config.d_model, config.encoder_layers,
-                               config.d_state, config.n_heads, dropout, device, dtype)
-
-        self.decoder = Decoder(config.vocab_size, config.d_model, config.decoder_layers,
-                               config.d_state, config.n_heads, config.num_pairs,
-                               config.hybrid_positions, dropout, config.block_type,
-                               config.mem_pool_size, config.mem_summary_dim,
-                               config.mem_tau1, config.mem_tau2,
-                               config.mem_update_freq, device, dtype)
+        self.decoder = Decoder(
+            self.config.vocab_size, self.config.d_model, self.config.decoder_layers,
+            self.config.d_state, self.config.n_heads, self.config.cross_attn_layers,
+            self.config.dropout, self.config.mem_pool_size, self.config.mem_summary_dim,
+            self.config.mem_update_freq, device, dtype
+        )
 
     def forward(self, src: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
         return self.decoder(tgt, self.encoder(src))
@@ -401,13 +329,15 @@ class HybridMambaEncoderDecoder(nn.Module):
 
 
 def get_unwrapped_model(model: nn.Module) -> nn.Module:
-    return model._orig_mod.module if hasattr(model, "_orig_mod") else model.module if hasattr(model, "module") else model
+    if hasattr(model, "_orig_mod"):
+        return model._orig_mod.module if hasattr(model._orig_mod, "module") else model._orig_mod
+    return model.module if hasattr(model, "module") else model
 
 
 def load_checkpoint(path: str, device: str, dtype: torch.dtype):
-    ckpt = torch.load(path, map_location='cpu', weights_only=False)
+    ckpt = torch.load(f"{path}/checkpoint.pt", map_location='cpu', weights_only=False)
     config = Config.from_dict(ckpt['config'])
     model = HybridMambaEncoderDecoder(config, device, dtype)
-    model.load_state_dict(ckpt['model_state_dict'])
+    model.load_state_dict(ckpt['model_state_dict'], strict=False)
     model.eval()
     return model, config
