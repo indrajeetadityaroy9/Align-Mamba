@@ -1,12 +1,14 @@
 """
-Align-Mamba: Hybrid Mamba-Attention blocks for Document-Level NMT.
+Align-Mamba: SOTA Hybrid Mamba-Attention for Document-Level NMT.
 
-HYBRID blocks at decoder [0, 8, 16] fix "Blind Start": Mamba creates contextualized
-query before cross-attention, ensuring correct initial alignment.
+Architecture integrates:
+- Polarized Mamba (arXiv:2501.00658): A=0/A=1 channels for recency bias mitigation
+- Zamba-style shared GSA (arXiv:2411.15242): Parameter-efficient cross-attention
+- Capacity-aware placement (arXiv:2506.11891): Layer 0 fixes "Blind Start"
 """
 
 import math
-from typing import Optional, List, Tuple, Dict, Union, Set
+from typing import Optional, List, Tuple, Dict, Set
 
 import torch
 import torch.nn as nn
@@ -14,29 +16,22 @@ import torch.nn as nn
 from .normalization import RMSNorm
 from .embeddings import ScaledEmbedding
 from .attention import BidirectionalAttention, FlashCrossAttention
-from .wrapper import Mamba2BlockWrapper
+from .wrapper import PolarizedMamba2Block
 from .bimamba import BiMambaBlock
 
 
-def compute_hybrid_positions_adaptive(
+def compute_cross_attention_positions(
     n_layers: int,
     d_state: int,
     num_pairs: int,
 ) -> Set[int]:
+    """Derive cross-attention placement from capacity theorem.
+
+    Layer 0 always included (Blind Start fix). Additional layers placed
+    at intervals based on capacity overflow ratio.
+
+    Reference: arXiv 2506.11891 (Theorem 2), arXiv 2510.03279 (Section 3.1)
     """
-    Derive cross-attention placement from capacity theorem.
-
-    Reference: Huang et al., 2025 (arXiv 2506.11891, Theorem 2)
-    "1-layer Mamba solves MQAR with state size N=κ"
-
-    When num_pairs > d_state, information overflows and requires
-    periodic cross-attention to retrieve from encoder.
-
-    Spacing derived from exponential decay rate of SSM memory.
-    Reference: arXiv 2510.03279 (MemMamba), Section 3.1
-    "contribution of x_{t-k} decays as |A^k|"
-    """
-    # Layer 0 always required (Blind Start fix)
     positions = {0}
 
     if num_pairs <= d_state:
@@ -61,7 +56,6 @@ class HybridBiMambaEncoder(nn.Module):
         n_layers: int = 16,
         d_state: int = 128,
         n_heads: int = 12,
-        attention_ratio: Optional[float] = None,
         dropout: float = 0.1,
         max_seq_len: int = 8192,
         pad_token_id: int = 0,
@@ -77,17 +71,8 @@ class HybridBiMambaEncoder(nn.Module):
             dropout=dropout, device=device, dtype=dtype,
         )
 
-        # Attention at N/2 and N-1 (2 layers for any n_layers >= 2)
-        if attention_ratio is None:
-            attention_ratio = 2.0 / n_layers
-        n_attention = max(2, int(n_layers * attention_ratio))
+        # Attention at N/2 and N-1
         self.attention_positions = {n_layers // 2, n_layers - 1}
-
-        # Add more positions if n_attention > 2
-        if n_attention > 2:
-            step = n_layers // (n_attention - 1)
-            for i in range(1, n_attention - 1):
-                self.attention_positions.add(i * step)
 
         factory_kwargs = {"device": device, "dtype": dtype}
         self.layers = nn.ModuleList()
@@ -132,16 +117,12 @@ class HybridBiMambaEncoder(nn.Module):
 
 
 class HybridMambaDecoder(nn.Module):
-    """Decoder with cross-attention at adaptive positions (arXiv 2506.11891).
+    """SOTA Decoder with polarized Mamba and Zamba-style shared cross-attention.
 
-    Layer 0 cross-attention fixes "Blind Start". Additional layers at intervals
-    derived from capacity overflow ratio when num_pairs > d_state.
-
-    Supports Zamba-style shared attention (concat_initial_residual=True):
-    - Single shared GSA block processes concatenated [current, initial] features
-    - Per-position output projections maintain layer-specific adaptation
-    - Reduces parameters while maintaining expressiveness
-    Reference: Glorioso et al., 2024 (arXiv 2411.15242, Zamba2)
+    Architecture:
+    - PolarizedMamba2Block: A=0 (local) + A=1 (global) channels fix recency bias
+    - Shared GSA: Single cross-attention block with [current, initial] concatenation
+    - Capacity-aware placement: Layer 0 + overflow-derived positions
     """
 
     def __init__(
@@ -151,9 +132,7 @@ class HybridMambaDecoder(nn.Module):
         n_layers: int = 24,
         d_state: int = 128,
         n_heads: int = 12,
-        hybrid_positions: Optional[List[int]] = None,
-        num_pairs: Optional[int] = None,
-        concat_initial_residual: bool = False,
+        num_pairs: int = 64,
         dropout: float = 0.1,
         max_seq_len: int = 8192,
         pad_token_id: int = 0,
@@ -164,51 +143,35 @@ class HybridMambaDecoder(nn.Module):
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.n_layers = n_layers
-        self.concat_initial_residual = concat_initial_residual
 
         self.embedding = ScaledEmbedding(
             vocab_size=vocab_size, d_model=d_model, padding_idx=pad_token_id,
             dropout=dropout, device=device, dtype=dtype,
         )
 
-        # Compute hybrid positions: explicit > adaptive > default {0}
-        if hybrid_positions is not None:
-            self.hybrid_positions = set(hybrid_positions)
-        elif num_pairs is not None:
-            self.hybrid_positions = compute_hybrid_positions_adaptive(n_layers, d_state, num_pairs)
-        else:
-            self.hybrid_positions = {0}  # Minimum: Layer 0 for Blind Start fix
+        # Capacity-aware cross-attention placement
+        self.cross_attn_positions = compute_cross_attention_positions(n_layers, d_state, num_pairs)
 
         factory_kwargs = {"device": device, "dtype": dtype}
+
+        # Polarized Mamba blocks (SOTA: A=0/A=1 channels)
         self.layers = nn.ModuleList([
-            Mamba2BlockWrapper(d_model=d_model, d_state=d_state, **factory_kwargs)
+            PolarizedMamba2Block(
+                d_model=d_model, d_state=d_state,
+                polarized_channels=2, **factory_kwargs
+            )
             for _ in range(n_layers)
         ])
 
-        # Cross-attention: Zamba-style shared GSA or per-layer
-        if concat_initial_residual:
-            # Zamba pattern: single shared attention with 2x input dim for [current, initial]
-            self.shared_cross_attn = FlashCrossAttention(
-                d_model=d_model * 2, n_heads=n_heads, dropout=dropout,
-                max_seq_len=max_seq_len, **factory_kwargs
-            )
-            # Per-position output projections (back to d_model)
-            self.cross_attn_out_projs = nn.ModuleDict({
-                str(i): nn.Linear(d_model * 2, d_model, bias=False, **factory_kwargs)
-                for i in self.hybrid_positions
-            })
-            self.cross_attn = None
-        else:
-            # Standard: per-layer cross-attention modules
-            self.cross_attn = nn.ModuleDict({
-                str(i): FlashCrossAttention(
-                    d_model=d_model, n_heads=n_heads, dropout=dropout,
-                    max_seq_len=max_seq_len, **factory_kwargs
-                )
-                for i in self.hybrid_positions
-            })
-            self.shared_cross_attn = None
-            self.cross_attn_out_projs = None
+        # Zamba-style shared GSA (SOTA: single shared attention)
+        self.shared_cross_attn = FlashCrossAttention(
+            d_model=d_model * 2, n_heads=n_heads, dropout=dropout,
+            max_seq_len=max_seq_len, **factory_kwargs
+        )
+        self.cross_attn_projs = nn.ModuleDict({
+            str(i): nn.Linear(d_model * 2, d_model, bias=False, **factory_kwargs)
+            for i in self.cross_attn_positions
+        })
 
         self.final_norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False, device=device, dtype=dtype)
@@ -224,13 +187,10 @@ class HybridMambaDecoder(nn.Module):
         self,
         input_ids: torch.Tensor,
         encoder_out: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
         encoder_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         x = self.embedding(input_ids)
-
-        # Zamba pattern: save initial residual for GSA concatenation
-        x_initial = x if self.concat_initial_residual else None
+        x_initial = x  # Zamba: save for GSA concatenation
 
         for i, layer in enumerate(self.layers):
             if self._gradient_checkpointing and self.training:
@@ -238,25 +198,15 @@ class HybridMambaDecoder(nn.Module):
             else:
                 x = layer(x)
 
-            if i in self.hybrid_positions and encoder_out is not None:
-                if self.concat_initial_residual:
-                    # Zamba: concat [current, initial] -> shared attention -> position-specific proj
-                    gsa_input = torch.cat([x, x_initial], dim=-1)
-                    if self._gradient_checkpointing and self.training:
-                        attn_out = torch.utils.checkpoint.checkpoint(
-                            self.shared_cross_attn, gsa_input, encoder_out, encoder_padding_mask, use_reentrant=False
-                        )
-                    else:
-                        attn_out = self.shared_cross_attn(gsa_input, encoder_out, encoder_padding_mask=encoder_padding_mask)
-                    x = x + self.cross_attn_out_projs[str(i)](attn_out)
+            if i in self.cross_attn_positions and encoder_out is not None:
+                gsa_input = torch.cat([x, x_initial], dim=-1)
+                if self._gradient_checkpointing and self.training:
+                    attn_out = torch.utils.checkpoint.checkpoint(
+                        self.shared_cross_attn, gsa_input, encoder_out, encoder_padding_mask, use_reentrant=False
+                    )
                 else:
-                    # Standard: per-layer cross-attention
-                    if self._gradient_checkpointing and self.training:
-                        x = torch.utils.checkpoint.checkpoint(
-                            self.cross_attn[str(i)], x, encoder_out, encoder_padding_mask, use_reentrant=False
-                        )
-                    else:
-                        x = self.cross_attn[str(i)](x, encoder_out, encoder_padding_mask=encoder_padding_mask)
+                    attn_out = self.shared_cross_attn(gsa_input, encoder_out, encoder_padding_mask=encoder_padding_mask)
+                x = x + self.cross_attn_projs[str(i)](attn_out)
 
         return self.lm_head(self.final_norm(x))
 
@@ -270,7 +220,6 @@ class HybridMambaDecoder(nn.Module):
         device = device or next(self.parameters()).device
         dtype = dtype or torch.bfloat16
 
-        # Store SSM states as tuples: (conv_state, ssm_state)
         ssm_states = {}
         for i, layer in enumerate(self.layers):
             ssm_states[i] = layer.allocate_inference_cache(batch_size=batch_size, dtype=dtype, device=device)
@@ -286,24 +235,17 @@ class HybridMambaDecoder(nn.Module):
         if self.embedding.dtype is not None:
             x = x.to(self.embedding.dtype)
 
-        # Zamba pattern: save initial residual for GSA concatenation
-        x_initial = x if self.concat_initial_residual else None
-
+        x_initial = x
         offset = cache["seqlen_offset"]
 
         for i, layer in enumerate(self.layers):
             state = cache["ssm_states"].get(i)
             x = layer(x, inference_params=state) if state else layer(x)
 
-            if i in self.hybrid_positions and cache["encoder_output"] is not None:
-                if self.concat_initial_residual:
-                    # Zamba: concat [current, initial] -> shared attention -> position-specific proj
-                    gsa_input = torch.cat([x, x_initial], dim=-1)
-                    attn_out = self.shared_cross_attn(gsa_input, cache["encoder_output"], decoder_offset=offset)
-                    x = x + self.cross_attn_out_projs[str(i)](attn_out)
-                else:
-                    # Standard: per-layer cross-attention
-                    x = self.cross_attn[str(i)](x, cache["encoder_output"], decoder_offset=offset)
+            if i in self.cross_attn_positions and cache["encoder_output"] is not None:
+                gsa_input = torch.cat([x, x_initial], dim=-1)
+                attn_out = self.shared_cross_attn(gsa_input, cache["encoder_output"], decoder_offset=offset)
+                x = x + self.cross_attn_projs[str(i)](attn_out)
 
         cache["seqlen_offset"] = offset + 1
         return self.lm_head(self.final_norm(x)), cache
