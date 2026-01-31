@@ -26,11 +26,11 @@ A critical finding: **Layer 0 cross-attention is essential**. Without it, the de
 pip install -e .
 
 # Run capacity cliff experiment (Hybrid should succeed, Pure Mamba should fail)
-python -m align_mamba.train experiment=01_proof_mqar_cliff \
+python -m align_mamba experiment=01_proof_mqar_cliff \
     model.hybrid_positions=[0,2] data.mqar.num_pairs=128
 
 # Run Blind Start ablation
-python -m align_mamba.train -m experiment=02_mechanism_ablation \
+python -m align_mamba -m experiment=02_mechanism_ablation \
     'model.hybrid_positions=[],[0],[0,2],[8,16]'
 ```
 
@@ -105,16 +105,16 @@ Uses [Hydra](https://hydra.cc/) for configuration composition:
 
 ```bash
 # Default config
-python -m align_mamba.train
+python -m align_mamba
 
 # Override parameters
-python -m align_mamba.train model.d_state=128 data.mqar.num_pairs=256
+python -m align_mamba model.d_state=128 data.mqar.num_pairs=256
 
 # Use experiment preset
-python -m align_mamba.train experiment=01_proof_mqar_cliff
+python -m align_mamba experiment=01_proof_mqar_cliff
 
 # Multi-seed sweep (Hydra multirun)
-python -m align_mamba.train -m experiment=01_proof_mqar_cliff \
+python -m align_mamba -m experiment=01_proof_mqar_cliff \
     project.seed=42,1337,2024 \
     model.hybrid_positions=[],[0,2]
 ```

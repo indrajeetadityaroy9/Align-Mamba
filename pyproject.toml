@@ -21,9 +21,9 @@ dependencies = [
 ]
 
 [project.scripts]
-align-train = "train:main"
-align-eval = "evaluate:main"
+align-train = "align_mamba.scripts.train:main"
+align-eval = "align_mamba.scripts.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["models*", "training*", "data*", "kernels*", "configs*"]
+include = ["align_mamba*"]
