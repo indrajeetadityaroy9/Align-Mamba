@@ -1,7 +1,7 @@
 """MQAR dataset for state capacity testing."""
 
 import random
-from typing import Dict, List, Tuple
+from typing import Dict, List, Literal, Tuple
 
 import numpy as np
 import torch
@@ -18,12 +18,15 @@ _MIN_SEQ_LEN = 512
 _NUM_WORKERS = 8
 
 
+Split = Literal["train", "validation", "test"]
+
+
 class MQARDataset(Dataset):
     """MQAR: Multi-Query Associative Recall."""
 
-    SPLIT_SEEDS = {"train": 42, "validation": 1042, "test": 2042}
+    SPLIT_SEEDS: Dict[str, int] = {"train": 42, "validation": 1042, "test": 2042}
 
-    def __init__(self, num_pairs: int, num_queries: int, num_samples: int, split: str):
+    def __init__(self, num_pairs: int, num_queries: int, num_samples: int, split: Split):
         self.num_pairs = num_pairs
         self.num_queries = min(num_queries, num_pairs)
         self.seq_len = max(_MIN_SEQ_LEN, int((1 + num_pairs * 3 + 1 + self.num_queries + 1) * 1.1))
@@ -76,7 +79,7 @@ def collate(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     return {'src_ids': src, 'tgt_ids': tgt, 'labels': labels[:, :tgt.size(1) - 1]}
 
 
-def create_dataloaders(config: Config, world_size: int, rank: int) -> Tuple[DataLoader, DataLoader]:
+def create_dataloaders(config: Config, *, world_size: int, rank: int) -> Tuple[DataLoader, DataLoader]:
     """Create distributed train/val loaders."""
     train = MQARDataset(config.num_pairs, config.num_queries, config.num_samples, "train")
     val = MQARDataset(config.num_pairs, config.num_queries, config.num_samples // 10, "validation")

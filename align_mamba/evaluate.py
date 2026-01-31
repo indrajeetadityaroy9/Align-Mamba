@@ -3,15 +3,25 @@
 import argparse
 import json
 from pathlib import Path
+from typing import Literal
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
+from align_mamba.config import Config
 from align_mamba.model import load_checkpoint
 from align_mamba.data import MQARDataset
 
 
-def evaluate(model, config, num_samples: int = 1000, batch_size: int = 32, device: str = "cuda") -> dict:
+def evaluate(
+    model: nn.Module,
+    config: Config,
+    *,
+    num_samples: int = 1000,
+    batch_size: int = 32,
+    device: str = "cuda",
+) -> dict:
     """Evaluate on MQAR task."""
     model.eval()
     dataset = MQARDataset(config.num_pairs, config.num_queries, num_samples, "test")
@@ -47,7 +57,14 @@ def evaluate(model, config, num_samples: int = 1000, batch_size: int = 32, devic
     }
 
 
-def capacity_cliff(model, config, num_samples: int = 500, batch_size: int = 32, device: str = "cuda") -> dict:
+def capacity_cliff(
+    model: nn.Module,
+    config: Config,
+    *,
+    num_samples: int = 500,
+    batch_size: int = 32,
+    device: str = "cuda",
+) -> dict:
     """Find capacity cliff where accuracy drops."""
     d_state = config.d_state
     results = []
@@ -83,18 +100,27 @@ def capacity_cliff(model, config, num_samples: int = 500, batch_size: int = 32, 
     return {"results": results, "cliff_point": cliff, "d_state": d_state}
 
 
+EvalMode = Literal["standard", "capacity_cliff"]
+
+
 def main():
     parser = argparse.ArgumentParser(prog="align-eval")
     parser.add_argument("checkpoint", help="Path to checkpoint directory")
-    parser.add_argument("--capacity_cliff", action="store_true", help="Run capacity cliff analysis")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["standard", "capacity_cliff"],
+        default="standard",
+        help="Evaluation mode: 'standard' or 'capacity_cliff'",
+    )
     args = parser.parse_args()
 
-    model, config = load_checkpoint(args.checkpoint, "cuda", torch.bfloat16)
+    model, config = load_checkpoint(args.checkpoint, device="cuda", dtype=torch.bfloat16)
 
     out = Path(config.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    if args.capacity_cliff:
+    if args.mode == "capacity_cliff":
         print(f"\nCapacity cliff eval (d_state={config.d_state})")
         results = capacity_cliff(model, config)
         with open(out / "capacity_cliff.json", "w") as f:

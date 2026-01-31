@@ -1,7 +1,7 @@
 """Polar-Mem-Mamba: Unified Hybrid Architecture."""
 
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,7 @@ from align_mamba.kernels.rmsnorm import fused_rmsnorm
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, d_model: int, device=None, dtype=None):
+    def __init__(self, d_model: int, *, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.eps = 1e-5
         self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
@@ -25,7 +25,7 @@ class RMSNorm(nn.Module):
 
 
 class Embedding(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int, dropout: float, device=None, dtype=None):
+    def __init__(self, vocab_size: int, d_model: int, dropout: float, *, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_model, padding_idx=0, device=device)
         self.scale = nn.Parameter(torch.tensor(math.sqrt(d_model)))
@@ -37,7 +37,7 @@ class Embedding(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim: int, device=None):
+    def __init__(self, dim: int, *, device: Optional[torch.device] = None):
         super().__init__()
         inv_freq = 1.0 / (10000.0 ** (torch.arange(0, dim, 2, device=device).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
@@ -60,18 +60,18 @@ class RotaryEmbedding(nn.Module):
 class CrossAttention(nn.Module):
     """Cross-attention with separate Q and KV dimensions for GSA."""
 
-    def __init__(self, d_q: int, d_kv: int, n_heads: int, dropout: float, device=None, dtype=None):
+    def __init__(self, d_q: int, d_kv: int, n_heads: int, dropout: float, *, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.n_heads = n_heads
         self.head_dim = d_q // n_heads
         self.scale = math.sqrt(self.head_dim)
         self.dropout = dropout
 
-        self.norm = RMSNorm(d_q, device, dtype)
+        self.norm = RMSNorm(d_q, device=device, dtype=dtype)
         self.q_proj = nn.Linear(d_q, d_q, bias=False, device=device, dtype=dtype)
         self.kv_proj = nn.Linear(d_kv, d_q * 2, bias=False, device=device, dtype=dtype)
         self.out_proj = nn.Linear(d_q, d_q, bias=False, device=device, dtype=dtype)
-        self.rope = RotaryEmbedding(self.head_dim, device)
+        self.rope = RotaryEmbedding(self.head_dim, device=device)
 
     def forward(self, x: torch.Tensor, encoder_out: torch.Tensor) -> torch.Tensor:
         residual = x
@@ -95,7 +95,7 @@ class CrossAttention(nn.Module):
 class MemoryPool(nn.Module):
     """Differentiable memory pool with learned gating."""
 
-    def __init__(self, d_model: int, pool_size: int, summary_dim: int, device=None, dtype=None):
+    def __init__(self, d_model: int, pool_size: int, summary_dim: int, *, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.pool_size = pool_size
         self.summary_dim = summary_dim
@@ -159,8 +159,18 @@ class MemoryPool(nn.Module):
 class PolarizedMemBlock(nn.Module):
     """SOTA block: Polarized Mamba2 + Differentiable Memory Pool."""
 
-    def __init__(self, d_model: int, d_state: int, pool_size: int, summary_dim: int,
-                 layer_idx: int, update_freq: int, device=None, dtype=None):
+    def __init__(
+        self,
+        d_model: int,
+        d_state: int,
+        pool_size: int,
+        summary_dim: int,
+        layer_idx: int,
+        update_freq: int,
+        *,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
         super().__init__()
         self.layer_idx = layer_idx
         self.update_freq = update_freq
@@ -168,13 +178,13 @@ class PolarizedMemBlock(nn.Module):
         self.summary_dim = summary_dim
 
         d_inner = d_model * 2
-        self.norm = RMSNorm(d_model, device, dtype)
+        self.norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.mamba = Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2,
                            headdim=64, device=device, dtype=dtype)
         self.zero_proj = nn.Linear(d_model, d_inner, bias=False, device=device, dtype=dtype)
         self.one_proj = nn.Linear(d_model, d_inner, bias=False, device=device, dtype=dtype)
         self.fusion = nn.Linear(d_inner * 3, d_model, bias=False, device=device, dtype=dtype)
-        self.memory = MemoryPool(d_model, pool_size, summary_dim, device, dtype)
+        self.memory = MemoryPool(d_model, pool_size, summary_dim, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor, pool: torch.Tensor,
                 priorities: torch.Tensor, counts: torch.Tensor):
@@ -198,9 +208,9 @@ class PolarizedMemBlock(nn.Module):
 
 
 class BiMambaBlock(nn.Module):
-    def __init__(self, d_model: int, d_state: int, device=None, dtype=None):
+    def __init__(self, d_model: int, d_state: int, *, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
         super().__init__()
-        self.norm = RMSNorm(d_model, device, dtype)
+        self.norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.fwd = Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2,
                          headdim=64, device=device, dtype=dtype)
         self.bwd = Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2,
@@ -215,16 +225,16 @@ class BiMambaBlock(nn.Module):
 
 
 class BiAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float, device=None, dtype=None):
+    def __init__(self, d_model: int, n_heads: int, dropout: float, *, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.dropout = dropout
 
-        self.norm = RMSNorm(d_model, device, dtype)
+        self.norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.qkv = nn.Linear(d_model, d_model * 3, bias=False, device=device, dtype=dtype)
         self.out = nn.Linear(d_model, d_model, bias=False, device=device, dtype=dtype)
-        self.rope = RotaryEmbedding(self.head_dim, device)
+        self.rope = RotaryEmbedding(self.head_dim, device=device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
@@ -238,17 +248,27 @@ class BiAttention(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int, n_layers: int, d_state: int,
-                 n_heads: int, dropout: float, device=None, dtype=None):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        n_layers: int,
+        d_state: int,
+        n_heads: int,
+        dropout: float,
+        *,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
         super().__init__()
-        self.embed = Embedding(vocab_size, d_model, dropout, device, dtype)
+        self.embed = Embedding(vocab_size, d_model, dropout, device=device, dtype=dtype)
         self.attn_pos = {n_layers // 2, n_layers - 1}
         self.layers = nn.ModuleList([
-            BiAttention(d_model, n_heads, dropout, device, dtype) if i in self.attn_pos
-            else BiMambaBlock(d_model, d_state, device, dtype)
+            BiAttention(d_model, n_heads, dropout, device=device, dtype=dtype) if i in self.attn_pos
+            else BiMambaBlock(d_model, d_state, device=device, dtype=dtype)
             for i in range(n_layers)
         ])
-        self.norm = RMSNorm(d_model, device, dtype)
+        self.norm = RMSNorm(d_model, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.embed(x)
@@ -258,30 +278,42 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int, n_layers: int, d_state: int,
-                 n_heads: int, cross_attn_layers: tuple, dropout: float,
-                 pool_size: int, summary_dim: int, update_freq: int,
-                 device=None, dtype=None):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        n_layers: int,
+        d_state: int,
+        n_heads: int,
+        cross_attn_layers: tuple,
+        dropout: float,
+        pool_size: int,
+        summary_dim: int,
+        update_freq: int,
+        *,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
         super().__init__()
         self.pool_size = pool_size
         self.summary_dim = summary_dim
-        self.embed = Embedding(vocab_size, d_model, dropout, device, dtype)
+        self.embed = Embedding(vocab_size, d_model, dropout, device=device, dtype=dtype)
 
         self.cross_attn_positions = set(cross_attn_layers)
         self.layers = nn.ModuleList([
             PolarizedMemBlock(d_model, d_state, pool_size, summary_dim,
-                             i, update_freq, device, dtype)
+                             i, update_freq, device=device, dtype=dtype)
             for i in range(n_layers)
         ])
 
         # CrossAttention: Q from GSA (d_model*2), KV from encoder (d_model)
-        self.cross_attn = CrossAttention(d_model * 2, d_model, n_heads, dropout, device, dtype)
+        self.cross_attn = CrossAttention(d_model * 2, d_model, n_heads, dropout, device=device, dtype=dtype)
         self.cross_projs = nn.ModuleDict({
             str(i): nn.Linear(d_model * 2, d_model, bias=False, device=device, dtype=dtype)
             for i in self.cross_attn_positions
         })
 
-        self.norm = RMSNorm(d_model, device, dtype)
+        self.norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.head = nn.Linear(d_model, vocab_size, bias=False, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor, encoder_out: torch.Tensor) -> torch.Tensor:
@@ -304,28 +336,35 @@ class Decoder(nn.Module):
 
 
 class HybridMambaEncoderDecoder(nn.Module):
-    def __init__(self, config: Config = None, device=None, dtype=None):
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        *,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
         super().__init__()
         self.config = config or Config()
 
         self.encoder = Encoder(
             self.config.vocab_size, self.config.d_model, self.config.encoder_layers,
-            self.config.d_state, self.config.n_heads, self.config.dropout, device, dtype
+            self.config.d_state, self.config.n_heads, self.config.dropout,
+            device=device, dtype=dtype,
         )
 
         self.decoder = Decoder(
             self.config.vocab_size, self.config.d_model, self.config.decoder_layers,
             self.config.d_state, self.config.n_heads, self.config.cross_attn_layers,
             self.config.dropout, self.config.mem_pool_size, self.config.mem_summary_dim,
-            self.config.mem_update_freq, device, dtype
+            self.config.mem_update_freq, device=device, dtype=dtype,
         )
 
     def forward(self, src: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
         return self.decoder(tgt, self.encoder(src))
 
     @classmethod
-    def from_config(cls, config: Config, device: str, dtype: torch.dtype):
-        return cls(config, device, dtype)
+    def from_config(cls, config: Config, *, device: str, dtype: torch.dtype) -> "HybridMambaEncoderDecoder":
+        return cls(config, device=device, dtype=dtype)
 
 
 def get_unwrapped_model(model: nn.Module) -> nn.Module:
@@ -334,10 +373,15 @@ def get_unwrapped_model(model: nn.Module) -> nn.Module:
     return model.module if hasattr(model, "module") else model
 
 
-def load_checkpoint(path: str, device: str, dtype: torch.dtype):
+def load_checkpoint(
+    path: str,
+    *,
+    device: str,
+    dtype: torch.dtype,
+) -> Tuple["HybridMambaEncoderDecoder", Config]:
     ckpt = torch.load(f"{path}/checkpoint.pt", map_location='cpu', weights_only=False)
     config = Config.from_dict(ckpt['config'])
-    model = HybridMambaEncoderDecoder(config, device, dtype)
+    model = HybridMambaEncoderDecoder(config, device=device, dtype=dtype)
     model.load_state_dict(ckpt['model_state_dict'], strict=False)
     model.eval()
     return model, config

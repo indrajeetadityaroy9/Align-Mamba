@@ -1,5 +1,7 @@
 """Fused cross-entropy with label smoothing."""
 
+from typing import Literal
+
 import torch
 import triton
 import triton.language as tl
@@ -41,9 +43,17 @@ def _ce_kernel(LOGITS, LABELS, LOSSES, stride, V, smoothing, ignore_idx, BLOCK: 
     tl.store(LOSSES + row, loss)
 
 
-def fused_cross_entropy_loss(logits: torch.Tensor, labels: torch.Tensor,
-                              smoothing: float = 0.1, ignore_index: int = -100,
-                              reduction: str = "mean") -> torch.Tensor:
+Reduction = Literal["mean", "sum", "none"]
+
+
+def fused_cross_entropy_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    smoothing: float = 0.1,
+    ignore_index: int = -100,
+    reduction: Reduction = "mean",
+) -> torch.Tensor:
     """Cross-entropy with label smoothing."""
     if logits.dim() == 3:
         B, T, V = logits.shape

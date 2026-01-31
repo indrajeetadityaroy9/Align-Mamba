@@ -28,7 +28,7 @@ torchrun --nproc_per_node=N -m align_mamba.train
 align-eval outputs/best
 
 # Capacity cliff analysis
-align-eval outputs/best --capacity_cliff
+align-eval outputs/best --mode capacity_cliff
 ```
 
 ## Architecture

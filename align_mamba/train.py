@@ -15,6 +15,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
 from align_mamba.config import Config
+from align_mamba.data import create_dataloaders
 from align_mamba.model import HybridMambaEncoderDecoder, get_unwrapped_model
 from align_mamba.kernels.loss import fused_cross_entropy_loss
 
@@ -40,7 +41,7 @@ def setup_distributed():
 
 
 class CosineScheduler:
-    def __init__(self, optimizer, warmup: int, max_steps: int):
+    def __init__(self, optimizer: torch.optim.Optimizer, *, warmup: int, max_steps: int):
         self.optimizer = optimizer
         self.warmup = warmup
         self.max_steps = max_steps
@@ -62,7 +63,14 @@ class CosineScheduler:
 
 
 class Trainer:
-    def __init__(self, model, train_loader, config, dist_info, eval_loader):
+    def __init__(
+        self,
+        model: HybridMambaEncoderDecoder,
+        train_loader: DataLoader,
+        config: Config,
+        dist_info: dict,
+        eval_loader: DataLoader,
+    ):
         self.config = config
         self.train_loader = train_loader
         self.eval_loader = eval_loader
@@ -88,7 +96,7 @@ class Trainer:
         ]
         self.optimizer = torch.optim.AdamW(groups, lr=config.learning_rate,
                                            betas=(0.9, 0.95), eps=1e-8, fused=True)
-        self.scheduler = CosineScheduler(self.optimizer, config.warmup_steps, config.max_steps)
+        self.scheduler = CosineScheduler(self.optimizer, warmup=config.warmup_steps, max_steps=config.max_steps)
 
         steps_per_epoch = config.num_samples // config.batch_size
         self.log_steps = max(1, steps_per_epoch // 100)
@@ -120,7 +128,7 @@ class Trainer:
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 logits = self.model(batch["src_ids"], batch["tgt_ids"][:, :-1])
-                loss = fused_cross_entropy_loss(logits, batch["labels"], self.config.label_smoothing)
+                loss = fused_cross_entropy_loss(logits, batch["labels"], smoothing=self.config.label_smoothing)
 
             loss.backward()
             loss_accum += loss.detach()
@@ -211,10 +219,9 @@ def main():
     config = Config()
     dist_info = setup_distributed()
 
-    model = HybridMambaEncoderDecoder(config, str(dist_info["device"]), torch.bfloat16)
+    model = HybridMambaEncoderDecoder(config, device=str(dist_info["device"]), dtype=torch.bfloat16)
 
-    from align_mamba.data import create_dataloaders
-    train_loader, val_loader = create_dataloaders(config, dist_info["world_size"], dist_info["rank"])
+    train_loader, val_loader = create_dataloaders(config, world_size=dist_info["world_size"], rank=dist_info["rank"])
 
     if dist_info["is_main"]:
         params = sum(p.numel() for p in model.parameters())
