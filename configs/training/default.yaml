@@ -50,3 +50,8 @@ log_steps: 100
 eval_steps: 1000
 save_steps: 5000
 output_dir: outputs
+
+# KL-Guided Layer Selection (arXiv:2512.20569)
+# For post-training refinement of attention placement
+kl_calibration_samples: 10000
+kl_temperature: 2.0

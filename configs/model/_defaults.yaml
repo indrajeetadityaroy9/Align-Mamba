@@ -28,3 +28,34 @@ vocab_size: 32768
 
 # Initialization
 mimetic_init: false
+
+# ============================================
+# SOTA Parameters (arXiv 2025)
+# ============================================
+
+# Zamba-Style Shared Attention (arXiv:2411.15242, Zamba2)
+# Concat [current, initial] before shared GSA block
+concat_initial_residual: false
+
+# Polarization (arXiv:2501.00658, ICLR 2025)
+# A=0 (local) + A=1 (global) channels for recency bias mitigation
+polarized_channels: 0  # 0 = disabled, 2 = standard polarization
+
+# HGRN2 State Expansion (arXiv:2404.07904, COLM 2024)
+# Outer product d->d^2 without additional parameters
+expansion_head_dim: null  # null = disabled, 128 = HGRN2 optimal
+
+# BASED Attention (arXiv:2402.18668, Stanford 2024)
+# 2nd-order Taylor feature map + sliding window
+based_feature_dim: null  # null = disabled, 16 = standard
+based_window_size: 64  # Sliding window (tensor-core aligned)
+
+# MemMamba (arXiv:2510.03279)
+# Cross-layer memory pool for long-range retrieval
+memory_pool_size: 0  # 0 = disabled, 50 = standard
+memory_summary_dim: 64  # Compressed summary dimension
+cross_layer_frequency: 4  # Aggregate every p layers
+
+# KL-Guided Selection (arXiv:2512.20569)
+# For post-training refinement of attention placement
+target_softmax_ratio: 0.125  # 1:8 attention:mamba ratio
