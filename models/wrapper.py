@@ -20,7 +20,6 @@ class Mamba2BlockWrapper(nn.Module):
         d_conv: int = 4,
         expand: int = 2,
         headdim: int = 64,
-        layer_idx: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
@@ -30,7 +29,6 @@ class Mamba2BlockWrapper(nn.Module):
         self.d_state = d_state
         self.d_conv = d_conv
         self.expand = expand
-        self.layer_idx = layer_idx
 
         factory_kwargs = {"device": device, "dtype": dtype}
 

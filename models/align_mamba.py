@@ -173,8 +173,8 @@ class HybridMambaDecoder(nn.Module):
 
         factory_kwargs = {"device": device, "dtype": dtype}
         self.layers = nn.ModuleList([
-            Mamba2BlockWrapper(d_model=d_model, d_state=d_state, layer_idx=i, **factory_kwargs)
-            for i in range(n_layers)
+            Mamba2BlockWrapper(d_model=d_model, d_state=d_state, **factory_kwargs)
+            for _ in range(n_layers)
         ])
 
         self.cross_attn = nn.ModuleDict({

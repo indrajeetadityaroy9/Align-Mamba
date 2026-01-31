@@ -15,15 +15,6 @@ REMOVED (Now Computed Adaptively):
 """
 
 # =============================================================================
-# Mamba Block Parameters
-# Reference: Gu & Dao, 2023 (arXiv 2312.00752, Section 3.4)
-# "We use a local convolution of width 4"
-# "expansion factor E = 2" (standard SSM practice)
-# =============================================================================
-MAMBA_D_CONV = 4
-MAMBA_EXPAND = 2
-
-# =============================================================================
 # Token IDs (NLP Convention)
 # Standard practice, no citation needed
 # =============================================================================

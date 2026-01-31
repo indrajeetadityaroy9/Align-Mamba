@@ -1,6 +1,6 @@
 """Shared utilities for Mamba models with optimized segment processing."""
 
-from typing import Optional, List, Tuple
+from typing import List, Tuple
 import torch
 import torch.nn as nn
 
@@ -94,34 +94,6 @@ def process_segments_unidirectional(
     return torch.cat(outputs, dim=0)
 
 
-def segment_aware_flip_optimized(
-    x: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """
-    Flip sequences respecting document boundaries, optimized.
-
-    Args:
-        x: Input tensor (total_tokens, ...) or (batch, seq_len, ...)
-        cu_seqlens: Cumulative sequence lengths for packed sequences
-
-    Returns:
-        Flipped tensor
-    """
-    if cu_seqlens is None:
-        return torch.flip(x, dims=[1])
-
-    # Single GPU->CPU sync for all boundaries
-    boundaries = compute_segment_boundaries(cu_seqlens)
-
-    flipped_segments = []
-    for start, end in boundaries:
-        segment = x[start:end]
-        flipped_segments.append(torch.flip(segment, dims=[0]))
-
-    return torch.cat(flipped_segments, dim=0)
-
-
 def get_unwrapped_model(model: nn.Module) -> nn.Module:
     """
     Unwrap model from torch.compile and DDP/FSDP wrappers.
@@ -143,60 +115,9 @@ def get_unwrapped_model(model: nn.Module) -> nn.Module:
     return model
 
 
-# Weight decay parameter patterns - centralized for consistency
-NO_DECAY_PATTERNS = [
-    "bias",
-    "LayerNorm.weight",
-    "layer_norm.weight",
-    "norm.weight",
-    "RMSNorm.weight",
-    "rmsnorm.weight",
-]
-
-
-def split_params_for_weight_decay(
-    model: nn.Module,
-    weight_decay: float,
-    patterns: Optional[List[str]] = None,
-) -> List[dict]:
-    """
-    Split model parameters into groups with and without weight decay.
-
-    Args:
-        model: Model to get parameters from
-        weight_decay: Weight decay value for decayed parameters
-        patterns: Patterns for parameters that should NOT have weight decay
-                  Defaults to NO_DECAY_PATTERNS
-
-    Returns:
-        List of parameter groups for optimizer
-    """
-    if patterns is None:
-        patterns = NO_DECAY_PATTERNS
-
-    params_with_wd = []
-    params_without_wd = []
-
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if any(pattern in name for pattern in patterns):
-            params_without_wd.append(param)
-        else:
-            params_with_wd.append(param)
-
-    return [
-        {"params": params_with_wd, "weight_decay": weight_decay},
-        {"params": params_without_wd, "weight_decay": 0.0},
-    ]
-
-
 __all__ = [
     "compute_segment_boundaries",
     "process_segments_bimamba",
     "process_segments_unidirectional",
-    "segment_aware_flip_optimized",
     "get_unwrapped_model",
-    "split_params_for_weight_decay",
-    "NO_DECAY_PATTERNS",
 ]

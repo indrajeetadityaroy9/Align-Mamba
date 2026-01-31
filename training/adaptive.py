@@ -6,69 +6,10 @@ explicit paper references justifying the approach.
 """
 
 import math
-from typing import Dict, Iterator, Optional
+from typing import Dict, Iterator
 
-import numpy as np
 import torch
 import torch.nn as nn
-
-
-# =============================================================================
-# Adaptive Warmup
-# Reference: Goyal et al., 2017 (arXiv 1706.02677)
-# "Gradual warmup helps to alleviate the early training instability"
-# =============================================================================
-
-class AdaptiveWarmupScheduler:
-    """End warmup when gradient norm coefficient of variation stabilizes.
-
-    Instead of using a fixed warmup ratio (e.g., 5%), this scheduler
-    monitors gradient norm stability and ends warmup when gradients
-    become predictable (CV < threshold).
-
-    Reference: Goyal et al., 2017 (arXiv 1706.02677)
-    """
-
-    def __init__(
-        self,
-        base_lr: float,
-        min_steps: int = 100,
-        stability_threshold: float = 0.1,
-        window_size: int = 50,
-    ):
-        self.base_lr = base_lr
-        self.min_steps = min_steps
-        self.stability_threshold = stability_threshold
-        self.window_size = window_size
-        self.grad_norms = []
-        self.warmup_done = False
-        self.warmup_ended_at = None
-
-    def step(self, grad_norm: float) -> float:
-        """Update with current gradient norm, return learning rate."""
-        if self.warmup_done:
-            return self.base_lr
-
-        self.grad_norms.append(grad_norm)
-        step = len(self.grad_norms)
-
-        # Check stability after minimum steps
-        if step >= self.min_steps and len(self.grad_norms) >= self.window_size:
-            recent = self.grad_norms[-self.window_size:]
-            mean = np.mean(recent)
-            std = np.std(recent)
-            cv = std / (mean + 1e-8)  # Coefficient of variation
-
-            if cv < self.stability_threshold:
-                self.warmup_done = True
-                self.warmup_ended_at = step
-                return self.base_lr
-
-        # Linear warmup until stable
-        return self.base_lr * step / (step + self.min_steps)
-
-    def is_warmup_done(self) -> bool:
-        return self.warmup_done
 
 
 # =============================================================================
@@ -268,31 +209,3 @@ def compute_logging_intervals(
         "eval_steps": max(10, steps_per_epoch // target_evals_per_epoch),
         "save_steps": max(100, steps_per_epoch // target_saves_per_epoch),
     }
-
-
-# =============================================================================
-# Cosine Annealing (No Fixed Minimum LR)
-# Reference: Loshchilov & Hutter, 2016 (arXiv 1608.03983, SGDR)
-# "SGDR: Stochastic Gradient Descent with Warm Restarts"
-# =============================================================================
-
-def cosine_annealing_lr(
-    step: int,
-    warmup_steps: int,
-    max_steps: int,
-    base_lr: float,
-    min_lr: float = 0.0,  # Pure cosine per SGDR
-) -> float:
-    """Compute learning rate with linear warmup + cosine annealing.
-
-    Reference: Loshchilov & Hutter, 2016 (arXiv 1608.03983)
-    """
-    if step < warmup_steps:
-        # Linear warmup
-        return base_lr * step / max(1, warmup_steps)
-    else:
-        # Cosine annealing
-        progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-        progress = min(1.0, progress)  # Clamp to [0, 1]
-        scale = 0.5 * (1 + math.cos(math.pi * progress))
-        return min_lr + (base_lr - min_lr) * scale

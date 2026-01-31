@@ -17,16 +17,13 @@ max_steps: 100000
 
 # Optimization
 learning_rate: 3e-4
-# weight_decay: REMOVED - now computed per-parameter adaptively
 
 # Adaptive Gradient Clipping (AGC) - Brock et al., 2021
 # Factor is computed per-parameter from initialization scale
 use_agc: true
-# agc_clip_factor: REMOVED - now derived per-parameter
 
 # Learning Rate Schedule
 scheduler_type: cosine
-# warmup_ratio: REMOVED - now ends when gradient norm stabilizes
 
 # Label Smoothing (null = auto-scale based on vocab entropy)
 # Reference: Muller et al., 2019 (arXiv 1906.02629)
