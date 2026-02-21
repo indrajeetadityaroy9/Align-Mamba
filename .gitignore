@@ -35,18 +35,20 @@ wheels/
 =*
 
 # Training outputs and checkpoints
+results/
+!results/.gitkeep
 outputs/
-align_mamba/outputs/
+checkpoints/
+!checkpoints/.gitkeep
 *.pt
 *.pth
 *.ckpt
-checkpoints/
 
-# Data files and directories (but NOT the align_mamba/data/ source code!)
+# Data files and directories
 /data/
 datasets/
 
-# Large data file formats (but keep requirements.txt and config yamls)
+# Large data file formats
 *.jsonl
 *.csv
 *.tsv
@@ -60,9 +62,8 @@ datasets/
 *.safetensors
 *.msgpack
 
-# Tokenizer files (but keep the project's tokenizer configs)
+# Tokenizer files
 *.model
-# Note: tokenizer.json files in align_mamba/data/tokenizer/ are tracked via git add -f
 
 # Experiment results and logs
 experiments/
@@ -101,12 +102,6 @@ htmlcov/
 # Distribution
 *.manifest
 *.spec
-
-# Resources (large PDF files)
-resources/
-
-# Hydra outputs
-multirun/
 
 # Weights & Biases
 wandb/

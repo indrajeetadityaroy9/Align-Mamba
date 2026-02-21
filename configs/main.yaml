@@ -1,10 +1,6 @@
-# Primary results: Polar-Mem-Mamba on MQAR
-# Training: torchrun --nproc_per_node=N -m align_mamba.train --config configs/main.yaml
-# Eval:     align-eval --config configs/main.yaml
-
 run:
   seed: 42
-  output_dir: outputs
+  output_dir: results
 
 model:
   d_model: 256
@@ -12,16 +8,23 @@ model:
   decoder_layers: 6
   d_state: 64
   n_heads: 4
-  cross_attn_layers: [0, 2]
-  mem_pool_size: 50
-  mem_summary_dim: 64
-  mem_update_freq: 4
+  encoder_inject_layers: [0, 2]
+  encoder_attn_layers: [3, 5]
+  n_persistent_mem: 8
   dropout: 0.1
+  block_size: 4
+  n_householder_steps: 2
+  kronecker_partitions: 5
+  kronecker_subdim: 4
+  top_k_slots: 8
+  decay_gamma_init: 1.0
+  decoder_attn_layer: 4
 
 data:
   num_pairs: 128
   num_queries: 16
   num_samples: 100000
+  val_ratio: 0.1
 
 training:
   batch_size: 256
@@ -30,10 +33,12 @@ training:
   weight_decay: 0.01
   label_smoothing: 0.1
   grad_clip: 1.0
-  warmup_ratio: 0.01
+  resume_from: ""
 
-eval:
-  checkpoint: outputs/best
+checkpoint:
+  path: results/best
+
+evaluation:
   mode: standard
   num_samples: 1000
   batch_size: 32
